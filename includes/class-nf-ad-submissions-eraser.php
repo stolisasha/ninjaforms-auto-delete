@@ -103,9 +103,16 @@ class NF_AD_Submissions_Eraser {
         // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
         $sub_action = $settings['sub_handling'] ?? 'keep';
 
+        global $wpdb;
+
+        // Optional: official Ninja Forms File Uploads add-on table.
+        $uploads_table = $wpdb->prefix . 'ninja_forms_uploads';
+        $has_uploads_table = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $uploads_table ) ) === $uploads_table );
+
         $global     = (int) ( $settings['global'] ?? 365 );
         $forms      = Ninja_Forms()->form()->get_forms();
         $total_count = 0;
+        $start = time();
 
         foreach ( $forms as $form ) {
             $rule = $settings['forms'][ $form->get_id() ] ?? [ 'mode' => 'global' ];
@@ -148,10 +155,49 @@ class NF_AD_Submissions_Eraser {
             ];
 
             if ( $type === 'files' ) {
+                // Prefer the official File Uploads add-on table when available.
+                // This matches the File Uploads admin UI and avoids relying on submission meta formats.
+                if ( $has_uploads_table ) {
+                    // Try common datetime columns used by the add-on.
+                    $cutoff_sql = $cutoff;
+
+                    // Some installs store form_id in a dedicated column.
+                    $count = 0;
+
+                    // Detect available columns once per request.
+                    static $uploads_columns = null;
+                    if ( null === $uploads_columns ) {
+                        $uploads_columns = $wpdb->get_col( "DESCRIBE {$uploads_table}", 0 );
+                    }
+
+                    $date_col = null;
+                    foreach ( array( 'created_at', 'date_created', 'created', 'created_on', 'date' ) as $c ) {
+                        if ( in_array( $c, $uploads_columns, true ) ) {
+                            $date_col = $c;
+                            break;
+                        }
+                    }
+
+                    $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
+
+                    if ( $date_col && $form_col ) {
+                        // Each row represents a single upload. Counting rows is equivalent to counting uploads.
+                        $sql   = "SELECT COUNT(1) FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < %s";
+                        $count = (int) $wpdb->get_var( $wpdb->prepare( $sql, $fid, $cutoff_sql ) );
+                    } elseif ( $date_col ) {
+                        // Fallback: count by date only if no form_id column exists.
+                        $sql   = "SELECT COUNT(1) FROM {$uploads_table} WHERE {$date_col} < %s";
+                        $count = (int) $wpdb->get_var( $wpdb->prepare( $sql, $cutoff_sql ) );
+                    }
+
+                    $total_count += $count;
+                    continue;
+                }
                 // Upload-Field-Keys einmalig pro Formular ermitteln und cachen.
                 if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
                     self::$upload_keys_cache[ $fid ] = [];
-                    $fields = Ninja_Forms()->form( $fid )->get_fields();
+                    $nf_form = Ninja_Forms()->form( $fid );
+                    $fields  = $nf_form ? $nf_form->get_fields() : [];
                     if ( is_iterable( $fields ) ) {
                         foreach ( $fields as $f ) {
                             if ( is_object( $f ) && method_exists( $f, 'get_setting' ) && $f->get_setting( 'type' ) === 'file_upload' ) {
@@ -160,16 +206,81 @@ class NF_AD_Submissions_Eraser {
                         }
                     }
                 }
+
                 $upload_keys = self::$upload_keys_cache[ $fid ];
                 if ( empty( $upload_keys ) ) {
                     continue;
                 }
-                // OR-Filter: mindestens ein Upload-Feld darf nicht leer sein.
+
+                // Query only submissions that actually have any upload meta not empty.
                 $meta_or = [ 'relation' => 'OR' ];
                 foreach ( $upload_keys as $k ) {
                     $meta_or[] = [ 'key' => $k, 'value' => '', 'compare' => '!=' ];
                 }
-                $args['meta_query'][] = $meta_or;
+
+                $paged = 1;
+                do {
+                    if ( ( time() - $start ) >= self::TIME_LIMIT ) {
+                        // Avoid hanging the AJAX request.
+                        break 2;
+                    }
+
+                    $paged_args                   = $args;
+                    $paged_args['posts_per_page'] = 200;
+                    $paged_args['paged']          = $paged;
+                    $paged_args['no_found_rows']  = true;
+                    $paged_args['meta_query'][]   = $meta_or;
+
+                    $q   = new WP_Query( $paged_args );
+                    $ids = $q->posts;
+                    wp_reset_postdata();
+
+                    if ( empty( $ids ) ) {
+                        break;
+                    }
+
+                    foreach ( $ids as $sid ) {
+                        if ( ( time() - $start ) >= self::TIME_LIMIT ) {
+                            break 3;
+                        }
+
+                        foreach ( $upload_keys as $meta_key ) {
+                            $raw = get_post_meta( $sid, $meta_key, true );
+                            if ( '' === $raw || null === $raw ) {
+                                continue;
+                            }
+
+                            $val = maybe_unserialize( $raw );
+
+                            // JSON-Strings erkennen und decodieren.
+                            if ( is_string( $val ) ) {
+                                $trim = trim( $val );
+                                if ( '' !== $trim && ( 0 === strpos( $trim, '[' ) || 0 === strpos( $trim, '{' ) ) ) {
+                                    $json = json_decode( $trim, true );
+                                    if ( JSON_ERROR_NONE === json_last_error() ) {
+                                        $val = $json;
+                                    }
+                                }
+                            }
+
+                            if ( empty( $val ) ) {
+                                continue;
+                            }
+
+                            // Count real files.
+                            if ( is_array( $val ) ) {
+                                $total_count += count( $val );
+                            } else {
+                                // string url/path OR numeric attachment ID counts as one.
+                                $total_count++;
+                            }
+                        }
+                    }
+
+                    $paged++;
+                } while ( true );
+
+                continue;
             }
 
             $q = new WP_Query( $args );

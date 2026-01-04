@@ -292,25 +292,38 @@ class NF_AD_Dashboard {
                     }
                     jQuery(document).ready(function($) {
                         $('.calc-btn').click(function() {
-                            var btn = $(this); var type = btn.data('type'); var label = btn.text();
+                            var btn   = $(this);
+                            var type  = btn.data('type');
+                            var label = btn.text();
+
                             btn.prop('disabled', true).text('Rechne...');
                             $('#calc-output').text('Analysiere Datenbank ...');
+
                             $.post(
                                 ajaxurl,
-                                { action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: type },
-                                function(res) {
-                                    btn.prop('disabled', false).text(label);
-                                    if (res && res.success) {
+                                { action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: type }
+                            )
+                                .done(function(res) {
+                                    if (res && res.success && res.data && typeof res.data.count !== 'undefined') {
                                         var txt = (res.data.type === 'subs') ? 'Einträge' : 'Uploads';
-                                        $('#calc-output').text('Simulation Ergebnis: ' + res.data.count + ' ' + txt + ' ' + 'sind älter als die Frist.');
+                                        $('#calc-output').text('Simulation Ergebnis: ' + res.data.count + ' ' + txt + ' sind älter als die Frist.');
+                                    } else if (res && res.data) {
+                                        // WP/AJAX returned a structured error.
+                                        $('#calc-output').text('Fehler: ' + res.data);
                                     } else {
                                         $('#calc-output').text('Fehler bei der Berechnung.');
                                     }
-                                }
-                            ).fail(function() {
-                                btn.prop('disabled', false).text(label);
-                                $('#calc-output').text('Fehler (Server).');
-                            });
+                                })
+                                .fail(function(xhr) {
+                                    var msg = 'Fehler (Server).';
+                                    if (xhr && xhr.responseJSON && xhr.responseJSON.data) {
+                                        msg = 'Fehler: ' + xhr.responseJSON.data;
+                                    }
+                                    $('#calc-output').text(msg);
+                                })
+                                .always(function() {
+                                    btn.prop('disabled', false).text(label);
+                                });
                         });
                     });
                     </script>

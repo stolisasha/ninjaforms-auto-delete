@@ -37,13 +37,83 @@ class NF_AD_Uploads_Deleter {
             return $stats;
         }
 
+        global $wpdb;
+
+        // Prefer the official Ninja Forms File Uploads add-on table when available.
+        $uploads_table = $wpdb->prefix . 'ninja_forms_uploads';
+        $has_uploads_table = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $uploads_table ) ) === $uploads_table );
+
+        if ( $has_uploads_table ) {
+            static $uploads_columns = null;
+            if ( null === $uploads_columns ) {
+                $uploads_columns = $wpdb->get_col( "DESCRIBE {$uploads_table}", 0 );
+            }
+
+            $sub_col  = null;
+            foreach ( array( 'submission_id', 'sub_id', 'submission', 'nf_sub_id' ) as $c ) {
+                if ( in_array( $c, $uploads_columns, true ) ) {
+                    $sub_col = $c;
+                    break;
+                }
+            }
+
+            $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
+            $data_col = null;
+            foreach ( array( 'data', 'upload_data', 'meta', 'file' ) as $c ) {
+                if ( in_array( $c, $uploads_columns, true ) ) {
+                    $data_col = $c;
+                    break;
+                }
+            }
+
+            if ( $sub_col && $data_col ) {
+                // Fetch all upload records for this submission.
+                if ( $form_col ) {
+                    $sql  = "SELECT {$data_col} FROM {$uploads_table} WHERE {$sub_col} = %d AND {$form_col} = %d";
+                    $rows = $wpdb->get_col( $wpdb->prepare( $sql, $sid, (int) $fid ) );
+                } else {
+                    $sql  = "SELECT {$data_col} FROM {$uploads_table} WHERE {$sub_col} = %d";
+                    $rows = $wpdb->get_col( $wpdb->prepare( $sql, $sid ) );
+                }
+
+                if ( ! empty( $rows ) ) {
+                    foreach ( $rows as $raw ) {
+                        $parsed = self::normalize_upload_data( $raw );
+                        if ( empty( $parsed ) ) {
+                            continue;
+                        }
+
+                        // Parsed can be a list of references or a single reference.
+                        if ( is_array( $parsed ) ) {
+                            foreach ( $parsed as $ref ) {
+                                $res = self::delete_file_reference( $ref );
+                                $stats['deleted'] += $res['deleted'];
+                                $stats['errors']  += $res['errors'];
+                            }
+                        } else {
+                            $res = self::delete_file_reference( $parsed );
+                            $stats['deleted'] += $res['deleted'];
+                            $stats['errors']  += $res['errors'];
+                        }
+                    }
+
+                    return $stats;
+                }
+            }
+        }
+
         // Formular-Objekt laden, um File-Upload-Felder sicher zu identifizieren.
         if ( ! function_exists( 'Ninja_Forms' ) ) {
             return $stats;
         }
-        $form = Ninja_Forms()->form( $fid );
+        $form   = Ninja_Forms()->form( $fid );
+        $fields = $form ? $form->get_fields() : [];
 
-        foreach ( $form->get_fields() as $f ) {
+        if ( ! is_iterable( $fields ) ) {
+            return $stats;
+        }
+
+        foreach ( $fields as $f ) {
             if ( $f->get_setting( 'type' ) !== 'file_upload' ) {
                 continue;
             }
@@ -62,6 +132,14 @@ class NF_AD_Uploads_Deleter {
                 $json = json_decode( $val, true );
                 if ( json_last_error() === JSON_ERROR_NONE ) {
                     $val = $json;
+                }
+            }
+
+            // Attachment-ID support (e.g., when "Save to Media Library" is enabled).
+            if ( is_numeric( $val ) ) {
+                $file = get_attached_file( (int) $val );
+                if ( $file ) {
+                    $val = $file;
                 }
             }
 
@@ -176,5 +254,96 @@ class NF_AD_Uploads_Deleter {
             return str_replace( $baseurl, $d['basedir'], $url );
         }
         return '';
+    }
+    /**
+     * Normalize upload data from the File Uploads add-on table.
+     * Supports serialized values, JSON, and mixed arrays.
+     *
+     * @param mixed $raw Raw DB value.
+     *
+     * @return mixed
+     */
+    private static function normalize_upload_data( $raw ) {
+        $val = maybe_unserialize( $raw );
+
+        if ( is_string( $val ) ) {
+            $trim = trim( $val );
+            if ( '' !== $trim && ( 0 === strpos( $trim, '[' ) || 0 === strpos( $trim, '{' ) ) ) {
+                $json = json_decode( $trim, true );
+                if ( JSON_ERROR_NONE === json_last_error() ) {
+                    $val = $json;
+                }
+            }
+        }
+
+        // Common structures: array of uploads, single upload array with url/path, or direct string.
+        if ( is_array( $val ) ) {
+            // If it looks like a single upload object.
+            if ( isset( $val['file_url'] ) || isset( $val['url'] ) || isset( $val['path'] ) || isset( $val['file_path'] ) || isset( $val['attachment_id'] ) ) {
+                return array( $val );
+            }
+
+            return $val;
+        }
+
+        return $val;
+    }
+
+    /**
+     * Delete a single file reference coming from either submission meta or the uploads table.
+     * Supported reference formats:
+     * - string URL
+     * - string absolute path
+     * - numeric attachment ID
+     * - array containing file_url/url/path/file_path/attachment_id
+     *
+     * @param mixed $ref File reference.
+     *
+     * @return array{deleted:int,errors:int}
+     */
+    private static function delete_file_reference( $ref ) {
+        $stats = [ 'deleted' => 0, 'errors' => 0 ];
+
+        if ( is_array( $ref ) ) {
+            if ( isset( $ref['attachment_id'] ) && is_numeric( $ref['attachment_id'] ) ) {
+                $ref = (int) $ref['attachment_id'];
+            } elseif ( isset( $ref['file_path'] ) && is_string( $ref['file_path'] ) ) {
+                $ref = $ref['file_path'];
+            } elseif ( isset( $ref['path'] ) && is_string( $ref['path'] ) ) {
+                $ref = $ref['path'];
+            } elseif ( isset( $ref['file_url'] ) && is_string( $ref['file_url'] ) ) {
+                $ref = $ref['file_url'];
+            } elseif ( isset( $ref['url'] ) && is_string( $ref['url'] ) ) {
+                $ref = $ref['url'];
+            } else {
+                // Unknown array shape.
+                $stats['errors']++;
+                return $stats;
+            }
+        }
+
+        // Attachment ID.
+        if ( is_numeric( $ref ) ) {
+            $file = get_attached_file( (int) $ref );
+            if ( $file ) {
+                $res = self::del( $file );
+                $stats['deleted'] += $res['deleted'];
+                $stats['errors']  += $res['errors'];
+                return $stats;
+            }
+            $stats['errors']++;
+            return $stats;
+        }
+
+        // URL/path string.
+        if ( is_string( $ref ) && '' !== $ref ) {
+            $res = self::del( $ref );
+            $stats['deleted'] += $res['deleted'];
+            $stats['errors']  += $res['errors'];
+            return $stats;
+        }
+
+        $stats['errors']++;
+        return $stats;
     }
 }
