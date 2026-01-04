@@ -38,6 +38,7 @@ if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
 // =============================================================================
 
 /* --- Kernklassen laden --- */
+
 // Der Logger wird vorab geladen, da er für Aktivierung und DB-Initialisierung benötigt wird.
 require_once NF_AD_PATH . 'includes/class-nf-ad-logger.php';
 
