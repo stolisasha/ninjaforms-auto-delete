@@ -39,11 +39,14 @@ function nf_ad_init() {
         return;
     }
 
-    // Erst JETZT laden wir die Logik-Klassen. 
+    // Erst JETZT laden wir die Logik-Klassen.
     // Das garantiert, dass wir keine NF-Klassen aufrufen, wenn NF fehlt.
-    require_once NF_AD_PATH . 'includes/class-nf-ad-uploads-deleter.php'; 
+    require_once NF_AD_PATH . 'includes/class-nf-ad-uploads-deleter.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-submissions-eraser.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-dashboard.php';
+
+    // Cron Hook (Action muss immer gebunden sein)
+    add_action( 'nf_ad_daily_event', [ 'NF_AD_Submissions_Eraser', 'run_cleanup_cron' ] );
 
     // Dashboard & Logik Hooks
     if ( is_admin() ) {
@@ -52,13 +55,35 @@ function nf_ad_init() {
         add_action( 'wp_ajax_nf_ad_clear_logs', [ 'NF_AD_Dashboard', 'ajax_clear_logs' ] );
         add_action( 'wp_ajax_nf_ad_force_cleanup', [ 'NF_AD_Dashboard', 'ajax_force_cleanup' ] );
         add_action( 'wp_ajax_nf_ad_calculate', [ 'NF_AD_Dashboard', 'ajax_calculate' ] );
-        
+
         // DB-Update Check (Safe, da Logger immer geladen ist)
         add_action( 'admin_init', [ 'NF_AD_Logger', 'maybe_update_db' ] );
     }
 
-    // Cron Hook
-    add_action( 'nf_ad_daily_event', [ 'NF_AD_Submissions_Eraser', 'run_cleanup_cron' ] );
+    // ---------------------------------------------------------
+    // SELF-HEALING: Cron-Existenz erzwingen
+    // ---------------------------------------------------------
+    // Wenn der Cron aktiv ist, aber WP das Event „vergessen“ hat,
+    // wird es beim nächsten Seitenaufruf automatisch neu registriert.
+    $settings  = get_option( 'nf_ad_settings', [] );
+    $is_active = ! empty( $settings['cron_active'] );
+
+    if ( $is_active && ! wp_next_scheduled( 'nf_ad_daily_event' ) ) {
+        // Wunsch-Stunde holen (Fallback: 3 Uhr nachts)
+        $cron_hour = isset( $settings['cron_hour'] ) ? (int) $settings['cron_hour'] : 3;
+
+        // Nächsten Ausführungszeitpunkt in WP-Zeitzone berechnen
+        $tz     = wp_timezone();
+        $now    = new DateTimeImmutable( 'now', $tz );
+        $target = $now->setTime( $cron_hour, 0, 0 );
+
+        // Wenn die Zeit heute schon vorbei ist, planen wir für morgen
+        if ( $target->getTimestamp() <= $now->getTimestamp() ) {
+            $target = $target->modify( '+1 day' );
+        }
+
+        wp_schedule_event( $target->getTimestamp(), 'daily', 'nf_ad_daily_event' );
+    }
 }
 
 // 4. ACTIVATION / DEACTIVATION
