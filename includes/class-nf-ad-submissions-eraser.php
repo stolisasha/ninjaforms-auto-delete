@@ -1,18 +1,83 @@
 <?php
-if ( ! defined( 'ABSPATH' ) ) exit;
 
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+// =============================================================================
+// SUBMISSIONS ERASER (BEREINIGUNG & DRY RUN)
+// =============================================================================
+
+/**
+ * Führt die automatische und manuelle Bereinigung von Ninja-Forms-Submissions durch.
+ * Optional werden zugehörige Upload-Dateien bereinigt.
+ */
 class NF_AD_Submissions_Eraser {
+    // =============================================================================
+    // KONSTANTEN & CACHES
+    // =============================================================================
+
+    /**
+     * Maximale Anzahl an Submissions pro Batch.
+     */
     const BATCH_LIMIT = 50; 
+
+    /**
+     * Maximale Laufzeit pro Durchlauf (Sekunden), um Timeouts zu vermeiden.
+     */
     const TIME_LIMIT = 20;
+
+    /**
+     * Cache für Upload-Meta-Keys je Formular (Field IDs), um wiederholte Field-Iterationen zu vermeiden.
+     *
+     * @var array<int, array<int, string>>
+     */
     static $upload_keys_cache = [];
 
-    public static function run_cleanup_cron() { self::run_cleanup_logic(true); }
-    public static function run_cleanup_manual() { return self::run_cleanup_logic(false); }
+    // =============================================================================
+    // ENTRYPOINTS
+    // =============================================================================
 
+    /* --- Cron vs. Manuell --- */
+
+    /**
+     * Entry-Point: Cron-Ausführung (automatischer Zeitplan).
+     *
+     * @return void
+     */
+    public static function run_cleanup_cron() 
+    {
+        self::run_cleanup_logic(true);
+    }
+
+    /**
+     * Entry-Point: Manuelle Ausführung (Admin-UI).
+     *
+     * @return array{deleted:int,has_more:bool}
+     */
+    public static function run_cleanup_manual() 
+    {
+        return self::run_cleanup_logic(false);
+    }
+
+    // =============================================================================
+    // DRY RUN (SIMULATION)
+    // =============================================================================
+
+    /* --- Berechnung ohne Löschung --- */
+
+    /**
+     * Berechnet die Anzahl der betroffenen Submissions oder Upload-Dateien, ohne Änderungen vorzunehmen.
+     *
+     * @param string $type "subs" für Submissions, "files" für Uploads.
+     *
+     * @return int
+     */
     public static function calculate_dry_run($type = 'subs') {
         global $wpdb;
         $settings = NF_AD_Dashboard::get_settings();
-        // When permanently deleting submissions, we must also consider items already in Trash (GDPR)
+
+        // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
         $sub_action = $settings['sub_handling'] ?? 'keep';
         
         $global = (int)($settings['global'] ?? 365);
@@ -25,11 +90,12 @@ class NF_AD_Submissions_Eraser {
             $days = ($rule['mode'] === 'custom') ? (int)$rule['days'] : $global;
             if($days < 1) $days = 365;
 
-            // Use WordPress site timezone (not server timezone) for cutoff calculation
+            // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
             $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
             $date = date( 'Y-m-d H:i:s', $threshold );
             $fid = $form->get_id();
             
+            // Baseline-Query: Submissions vor dem Cutoff-Datum, gefiltert nach Formular-ID.
             $sql = "SELECT COUNT(1)
                     FROM {$wpdb->posts} p
                     WHERE p.post_type = 'nf_sub'
@@ -41,13 +107,14 @@ class NF_AD_Submissions_Eraser {
                         AND pm.meta_key = '_form_id'
                         AND pm.meta_value = %d
                     )";
-            // Only exclude Trash when we are not doing permanent deletions.
-            // For permanent delete, include Trash so already-trashed submissions are found.
+            // Trash nur dann ausschließen, wenn nicht endgültig gelöscht wird.
+            // Bei "delete" muss Trash inkludiert sein, damit bereits getrashte Submissions gefunden werden.
             if ( $sub_action !== 'delete' ) {
                 $sql .= " AND p.post_status != 'trash'";
             }
 
             if ( $type === 'files' ) {
+                // Upload-Field-Keys einmalig pro Formular ermitteln und cachen.
                 if(!isset(self::$upload_keys_cache[$fid])) {
                     self::$upload_keys_cache[$fid] = [];
                     foreach ( Ninja_Forms()->form($fid)->get_fields() as $f ) {
@@ -60,7 +127,10 @@ class NF_AD_Submissions_Eraser {
 
                 if ( empty($upload_meta_keys) ) continue; 
 
+                // Dynamische IN-Liste für Meta-Keys (prepared placeholders).
                 $placeholders = implode(',', array_fill(0, count($upload_meta_keys), '%s'));
+
+                // Nur Submissions zählen, die mindestens ein Upload-Feld mit Inhalt besitzen.
                 $sql .= " AND EXISTS (
                     SELECT 1 FROM {$wpdb->postmeta} pm2
                     WHERE pm2.post_id = p.ID
@@ -79,6 +149,21 @@ class NF_AD_Submissions_Eraser {
         return $total_count;
     }
 
+    // =============================================================================
+    // CLEANUP-LOGIK (CRON & MANUELL)
+    // =============================================================================
+
+    /* --- Orchestrierung: Durchläufe, Limits, Logging --- */
+
+    /**
+     * Zentrale Bereinigungsroutine für Cron und manuelle Ausführung.
+     * Arbeitet in mehreren Durchläufen, bis keine passenden Submissions mehr gefunden werden
+     * oder das Zeitlimit erreicht ist.
+     *
+     * @param bool $is_cron true bei Cron-Ausführung.
+     *
+     * @return array{deleted:int,has_more:bool}
+     */
     private static function run_cleanup_logic($is_cron = false) {
         $settings = NF_AD_Dashboard::get_settings();
         
@@ -87,17 +172,19 @@ class NF_AD_Submissions_Eraser {
         
         $mode_info = "Subs=$sub_action, Files=$file_action";
         
-        // Prefix run message with a lightweight tag so the dashboard can visually distinguish Cron vs Manual.
+        // Run-Message mit Typ-Tag versehen, damit das Dashboard Cron und manuell klar unterscheidet.
         $type_tag = $is_cron ? '[CRON]' : '[MANUAL]';
         $msg_text = $is_cron ? 'Auto-Cron gestartet' : 'Manuelle Bereinigung gestartet';
         $run_id   = NF_AD_Logger::start_run( "$type_tag $msg_text [$mode_info]..." );
         $response = ['deleted' => 0, 'has_more' => false];
 
+        // Cron-Ausführung ist aktiv aufgerufen, aber in den Einstellungen deaktiviert: Run sauber abschließen.
         if ( $is_cron && empty($settings['cron_active']) ) {
             NF_AD_Logger::finish_run($run_id, 'skipped', 'Zeitplan deaktiviert.');
             return $response; 
         }
         
+        // Sicherheits-Exit: Keine Aktion konfiguriert (Submissions und Dateien werden behalten).
         if( $sub_action === 'keep' && $file_action === 'keep' ) { 
             NF_AD_Logger::finish_run($run_id, 'skipped', 'Einstellungen auf "Behalten" gesetzt.'); 
             return $response; 
@@ -108,15 +195,18 @@ class NF_AD_Submissions_Eraser {
         $total = 0; $errors = 0; $warnings = 0;
         $start = time(); $limit_reached = false;
 
+        // Mehrere Durchläufe: pro Formular Batches abarbeiten, bis keine Treffer mehr existieren oder TIME_LIMIT greift.
         do {
             $pass = 0;
             foreach($forms as $form) {
+                // Harte Laufzeitgrenze: Verarbeitung abbrechen, damit Cron/Request nicht in Timeouts läuft.
                 if((time()-$start) >= self::TIME_LIMIT) { $limit_reached = true; break; }
                 $rule = $settings['forms'][$form->get_id()] ?? ['mode'=>'global'];
                 if($rule['mode'] === 'never') continue;
                 $days = ($rule['mode'] === 'custom') ? (int)$rule['days'] : $global;
                 if($days < 1) $days = 365;
               
+                // Formularweise Verarbeitung: Batch selektieren und je Submission Aktionen ausführen.
                 $res = self::process_form($form->get_id(), $days, $sub_action, $file_action);
                 $pass += $res['count'];
                 $errors += $res['errors'];
@@ -126,10 +216,12 @@ class NF_AD_Submissions_Eraser {
             if((time()-$start) >= self::TIME_LIMIT) { $limit_reached = true; break; }
         } while($pass > 0);
 
+        // Endstatus ableiten: error schlägt warning, warning schlägt success.
         $final_status = 'success';
         if($errors > 0) $final_status = 'error';
         elseif($warnings > 0) $final_status = 'warning';
 
+        // Abschlussnachricht: bei TIME_LIMIT Hinweis auf Fortsetzung im nächsten Durchlauf.
         $status_msg = $limit_reached ? "Teilweise ($total verarbeitet). Weiter..." : "Fertig. $total verarbeitet.";
         if($errors > 0 || $warnings > 0) $status_msg .= " ($errors Fehler, $warnings Warnungen)";
 
@@ -139,11 +231,32 @@ class NF_AD_Submissions_Eraser {
         return ['deleted' => $total, 'has_more' => $limit_reached];
     }
 
+    // =============================================================================
+    // FORM-VERARBEITUNG (BATCH)
+    // =============================================================================
+
+    /* --- Selektion, Datei-Cleanup, Submission-Handling --- */
+
+    /**
+     * Verarbeitet ein Formular in einem Batch:
+     * 1) Submissions anhand des Cutoff-Datums selektieren.
+     * 2) Optional Uploads bereinigen.
+     * 3) Submission löschen, in Trash verschieben oder behalten.
+     * 4) Ergebnis pro Submission im Logger protokollieren.
+     *
+     * @param int    $fid         Formular-ID.
+     * @param int    $days        Cutoff in Tagen.
+     * @param string $sub_action  "keep" | "trash" | "delete".
+     * @param string $file_action "keep" | "delete".
+     *
+     * @return array{count:int,errors:int,warnings:int}
+     */
     private static function process_form( $fid, $days, $sub_action, $file_action ) {
-        // Use WordPress site timezone (not server timezone) for cutoff calculation
+        // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
         $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
         $date = date( 'Y-m-d H:i:s', $threshold );
         
+        // Basis-Query: Submissions vor Cutoff-Datum für das konkrete Formular (Batch-Limit).
         $query_args = [
             'post_type' => 'nf_sub',
             'posts_per_page' => self::BATCH_LIMIT,
@@ -153,6 +266,7 @@ class NF_AD_Submissions_Eraser {
         ];
 
         if ( $sub_action === 'keep' && $file_action === 'delete' ) {
+            // Sonderfall: Submissions bleiben, aber Uploads sollen gelöscht werden. Dafür nur Submissions mit Upload-Meta selektieren.
             if(!isset(self::$upload_keys_cache[$fid])) {
                 self::$upload_keys_cache[$fid] = [];
                 foreach ( Ninja_Forms()->form($fid)->get_fields() as $f ) {
@@ -163,6 +277,7 @@ class NF_AD_Submissions_Eraser {
 
             if(empty($upload_keys)) return ['count'=>0,'errors'=>0,'warnings'=>0]; 
 
+            // OR-Filter: mindestens ein Upload-Feld darf nicht leer sein.
             $meta_or = ['relation' => 'OR'];
             foreach($upload_keys as $k) {
                 $meta_or[] = [ 'key' => $k, 'value' => '', 'compare' => '!=' ];
@@ -170,22 +285,23 @@ class NF_AD_Submissions_Eraser {
             $query_args['meta_query'][] = $meta_or;
         }
 
+        // Post-Status Handling:
+        // Bei "delete" auch Trash einbeziehen (GDPR/DSGVO: bereits getrashte Submissions müssen bereinigt werden).
+        // Bei "trash"/"keep" Trash ausschließen (Performance, da bereits verarbeitet).
         $all_statuses = array_keys( get_post_stati() );
-
-        // LOGIC FIX:
-        // If we permanently delete submissions, we must also search in Trash (GDPR requirement).
-        // If we only move to Trash, we can exclude Trash for performance (already handled).
         if ( $sub_action === 'delete' ) {
             $query_args['post_status'] = $all_statuses; // include trash
         } else {
             $query_args['post_status'] = array_values( array_diff( $all_statuses, ['trash'] ) );
         }
 
+        // IDs abrufen (nur IDs, keine Post-Objekte), um Memory-Overhead zu minimieren.
         $ids = get_posts($query_args);
         
         $result = ['count'=>0, 'errors'=>0, 'warnings'=>0];
         if(empty($ids)) return $result;
 
+        // Pro Submission: optional Dateien bereinigen, dann Submission-Aktion ausführen und Ergebnis loggen.
         foreach ( $ids as $id ) {
             $stat = 'success';
             $sub_date = get_post_field( 'post_date', $id );
@@ -193,7 +309,7 @@ class NF_AD_Submissions_Eraser {
             $files_deleted = 0;
             $file_errors   = 0;
 
-            // 1) Files cleanup (optional)
+            // 1) Datei-Bereinigung (optional, abhängig von file_action).
             if ( $file_action === 'delete' && class_exists( 'NF_AD_Uploads_Deleter' ) ) {
                 $f_res = NF_AD_Uploads_Deleter::cleanup_files( $id );
                 $files_deleted = (int) ( $f_res['deleted'] ?? 0 );
@@ -205,7 +321,7 @@ class NF_AD_Submissions_Eraser {
                 }
             }
 
-            // 2) Submission handling
+            // 2) Submission-Handling gemäß sub_action (delete, trash, keep).
             $action_tag = '';
             $msg        = '';
 
@@ -253,7 +369,7 @@ class NF_AD_Submissions_Eraser {
                     $result['errors']++;
                     $msg = "{$action_tag} DB Fehler (Eintrag konnte nicht endgültig gelöscht werden).";
 
-                    // Still surface file warnings if they happened
+                    // Datei-Warnungen zusätzlich anfügen, falls beim Cleanup Fehler aufgetreten sind.
                     if ( $file_action === 'delete' && $file_errors > 0 ) {
                         $msg .= " [FILES][WARNING] {$file_errors} Datei-Fehler.";
                     }
@@ -274,8 +390,7 @@ class NF_AD_Submissions_Eraser {
                     $msg = "{$action_tag} Eintrag war bereits im Papierkorb.";
                 }
 
-                // In Trash mode we normally don't delete files, but if user enabled files delete anyway,
-                // we still log what happened.
+                // Im Trash-Modus werden Dateien normalerweise nicht gelöscht. Falls dennoch aktiviert, wird das Ergebnis mitprotokolliert.
                 if ( $file_action === 'delete' ) {
                     if ( $files_deleted > 0 ) {
                         $msg .= " [FILES] {$files_deleted} Datei(en) gelöscht.";
@@ -287,7 +402,7 @@ class NF_AD_Submissions_Eraser {
                 }
 
             } else {
-                // keep submissions
+                // Submissions behalten (optional nur Datei-Cleanup).
                 if ( $file_action === 'delete' ) {
                     $action_tag = '[FILES]';
 
@@ -305,7 +420,7 @@ class NF_AD_Submissions_Eraser {
                         $msg = "{$action_tag} Keine Dateien gefunden (Eintrag behalten).";
                     }
                 } else {
-                    // Shouldn't happen because run_cleanup_logic skips keep/keep, but keep a safe log.
+                    // Sollte nicht auftreten (keep/keep wird vorher abgefangen). Trotzdem defensiv protokollieren.
                     $action_tag = '[SKIP]';
                     $msg = "{$action_tag} Keine Aktion (Eintrag und Dateien behalten).";
                 }

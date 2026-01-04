@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Ninja Forms - Auto Delete
  * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen. 
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Alex Schlair
  * Author URI: https://www.pronto-media.at
  * Text Domain: nf-auto-delete
@@ -11,13 +11,21 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-// Versionierung und Pfade
+// =============================================================================
+// KONSTANTEN
+// =============================================================================
+
+/* --- Versionierung & Pfade --- */
 $nf_ad_plugin_data = get_file_data( __FILE__, [ 'Version' => 'Version' ], 'plugin' );
 define( 'NF_AD_VERSION', $nf_ad_plugin_data['Version'] );
 define( 'NF_AD_DB_VERSION', '1.2' );
 define( 'NF_AD_PATH', plugin_dir_path( __FILE__ ) );
 
-// 1. FAIL-SAFE PHP CHECK
+// =============================================================================
+// SYSTEMANFORDERUNGEN
+// =============================================================================
+
+/* --- PHP-Version prüfen --- */
 if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
     add_action( 'admin_notices', function() {
         echo '<div class="error"><p><strong>Auto Delete for Ninja Forms</strong> benötigt PHP 7.4 oder höher.</p></div>';
@@ -25,31 +33,44 @@ if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
     return;
 }
 
-// 2. BASIS-KLASSE LADEN
-// Der Logger muss IMMER verfügbar sein, da der Activation-Hook ihn für DB-Checks braucht,
-// selbst wenn Ninja Forms gerade nicht aktiv ist.
+// =============================================================================
+// BOOTSTRAP
+// =============================================================================
+
+/* --- Kernklassen laden --- */
+// Der Logger wird vorab geladen, da er für Aktivierung und DB-Initialisierung benötigt wird.
 require_once NF_AD_PATH . 'includes/class-nf-ad-logger.php';
 
-// 3. INIT & SAFE LOADING
+// =============================================================================
+// INITIALISIERUNG
+// =============================================================================
+
+/* --- Plugin-Hooks registrieren --- */
 add_action( 'plugins_loaded', 'nf_ad_init', 20 );
 
+/**
+ * Initialisiert das Plugin, sobald alle Plugins geladen sind.
+ *
+ * Lädt abhängige Klassen erst, wenn Ninja Forms verfügbar ist, und registriert
+ * alle benötigten Hooks (Cron, Admin-Menü, AJAX-Endpunkte).
+ *
+ * @return void
+ */
 function nf_ad_init() {
-    // Sicherheitscheck: Ist Ninja Forms überhaupt aktiv?
-    // Falls nein: Still beenden. Kein Fatal Error, keine Deaktivierung durch WP.
+    // Abhängigkeit: Ninja Forms muss aktiv sein.
     if ( ! class_exists( 'Ninja_Forms' ) ) {
         return;
     }
 
-    // Erst JETZT laden wir die Logik-Klassen.
-    // Das garantiert, dass wir keine NF-Klassen aufrufen, wenn NF fehlt.
+    // Abhängige Klassen erst nach erfolgreichem Abhängigkeits-Check laden.
     require_once NF_AD_PATH . 'includes/class-nf-ad-uploads-deleter.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-submissions-eraser.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-dashboard.php';
 
-    // Cron Hook (Action muss immer gebunden sein)
+    // Cron-Hook registrieren.
     add_action( 'nf_ad_daily_event', [ 'NF_AD_Submissions_Eraser', 'run_cleanup_cron' ] );
 
-    // Dashboard & Logik Hooks
+    // Admin-Hooks und AJAX-Endpunkte registrieren.
     if ( is_admin() ) {
         add_action( 'admin_menu', [ 'NF_AD_Dashboard', 'register_menu' ] );
         add_action( 'wp_ajax_nf_ad_retry_delete', [ 'NF_AD_Dashboard', 'ajax_retry_delete' ] );
@@ -61,11 +82,8 @@ function nf_ad_init() {
         add_action( 'admin_init', [ 'NF_AD_Logger', 'maybe_update_db' ] );
     }
 
-    // ---------------------------------------------------------
-    // SELF-HEALING: Cron-Existenz erzwingen
-    // ---------------------------------------------------------
-    // Wenn der Cron aktiv ist, aber WP das Event „vergessen“ hat,
-    // wird es beim nächsten Seitenaufruf automatisch neu registriert.
+    /* --- Cron-Event validieren (Self-Healing) --- */
+    // Re-Registrierung, falls Cron aktiv ist, aber kein Event geplant ist.
     $settings  = get_option( 'nf_ad_settings', [] );
     $is_active = ! empty( $settings['cron_active'] );
 
@@ -87,19 +105,40 @@ function nf_ad_init() {
     }
 }
 
-// 4. ACTIVATION / DEACTIVATION
+// =============================================================================
+// AKTIVIERUNG / DEAKTIVIERUNG
+// =============================================================================
+
+/* --- Aktivierung --- */
 register_activation_hook( __FILE__, 'nf_ad_activate' );
+
+/**
+ * Activation-Hook.
+ *
+ * Erstellt/aktualisiert die Log-Tabellen und setzt die DB-Version.
+ *
+ * @return void
+ */
 function nf_ad_activate() {
-    // Cron resetten
+    // Bestehende Cron-Events entfernen, um Doppel-Planungen zu vermeiden.
     wp_clear_scheduled_hook( 'nf_ad_daily_event' );
     
-    // DB erstellen (Logger Klasse ist sicher geladen)
+    // Log-Tabellen anlegen/aktualisieren.
     NF_AD_Logger::install_table();
     
     update_option( 'nf_ad_db_version', NF_AD_DB_VERSION );
 }
 
+/* --- Deaktivierung --- */
 register_deactivation_hook( __FILE__, 'nf_ad_deactivate' );
+
+/**
+ * Deactivation-Hook.
+ *
+ * Entfernt geplante Cron-Events des Plugins.
+ *
+ * @return void
+ */
 function nf_ad_deactivate() {
     $timestamp = wp_next_scheduled( 'nf_ad_daily_event' );
     if ( $timestamp ) wp_unschedule_event( $timestamp, 'nf_ad_daily_event' );

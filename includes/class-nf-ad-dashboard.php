@@ -1,34 +1,54 @@
 <?php
-if ( ! defined( 'ABSPATH' ) ) exit;
 
-// -----------------------------------------------------------------------------
-// Dashboard Controller
-// -----------------------------------------------------------------------------
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
+// =============================================================================
+// DASHBOARD (ADMIN UI)
+// =============================================================================
+
+/**
+ * Dashboard-Controller für die Admin-Oberfläche.
+ */
 class NF_AD_Dashboard {
 
-    // -----------------------------------------------------------------------------
-    // Konstanten
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // KONSTANTEN
+    // =============================================================================
     const OPTION_KEY = 'nf_ad_settings';
 
-    // -----------------------------------------------------------------------------
-    // Admin Menu
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // ADMIN MENU
+    // =============================================================================
+
+    /* --- Menüregistrierung --- */
+    /**
+     * Registriert das Submenü im Ninja-Forms-Admin-Menü.
+     *
+     * @return void
+     */
     public static function register_menu() {
         $hook = add_submenu_page( 'ninja-forms', 'Auto Delete', 'Auto Delete', 'manage_options', 'nf-auto-delete', [ __CLASS__, 'render_page' ] );
         add_action( "admin_print_styles-$hook", [ __CLASS__, 'enqueue_assets' ] );
     }
 
-    // -----------------------------------------------------------------------------
-    // Assets (Inline CSS/JS)
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // ASSETS (INLINE CSS/JS)
+    // =============================================================================
+
+    /* --- Styles & Skripte (Inline) --- */
+    /**
+     * Gibt Inline-CSS/JS für die Admin-Seite aus.
+     *
+     * @return void
+     */
     public static function enqueue_assets() {
         $nonce = wp_create_nonce( 'nf_ad_security' );
         ?>
         <script>window.NF_AD_Config = { nonce: '<?php echo esc_js($nonce); ?>' };</script>
         <style>
-            /* --- Badges & Utility --- */
+            /* --- Badges & Utilities --- */
             .nf-ad-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
             .nf-ad-badge.success { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
             .nf-ad-badge.error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
@@ -39,7 +59,7 @@ class NF_AD_Dashboard {
             .hidden { display: none !important; }
             .nf-ad-danger { color: #d63638; font-weight: 600; }
             
-            /* --- Layout Basics --- */
+            /* --- Layout Grundlagen --- */
             .wrap h1 { margin-bottom: 20px; }
             .nav-tab-wrapper { margin-bottom: 20px; border-bottom: 1px solid #c3c4c7; }
             .nav-tab { margin-right: 4px; padding: 6px 10px; } 
@@ -47,12 +67,12 @@ class NF_AD_Dashboard {
             .nf-ad-headline-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; min-height: 30px; }
             .nf-ad-headline-row h2 { margin: 0; font-size: 1.3em; color: #1d2327; font-weight: 600; padding: 0; }
             
-            /* --- Tables General --- */
+            /* --- Tabellen: Allgemein --- */
             .nf-ad-settings-table { margin-top: 0; }
             .nf-ad-settings-table th { width: 220px; padding: 15px 10px 15px 0; vertical-align: top; }
             .nf-ad-settings-table td { padding: 15px 10px; }
             
-            /* --- RULES TAB: Grid System --- */
+            /* --- Tab: Regeln (Grid-System) --- */
             .nf-ad-global-row { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, auto); column-gap: 24px; align-items: start; }
             .nf-ad-global-left { min-width: 0; }
             .nf-ad-global-left-controls { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -66,7 +86,7 @@ class NF_AD_Dashboard {
                 .nf-ad-global-right { justify-self: start; text-align: left; }
             }
 
-            /* --- Rules Table Specifics --- */
+            /* --- Tabelle: Regeln (Spezifika) --- */
             .nf-ad-table-rules { table-layout: fixed; width: 100%; border-collapse: collapse; }
             .nf-ad-table-rules th.column-id, .nf-ad-table-rules td.column-id { width: 60px; text-align: left; vertical-align: middle; padding-right: 6px; white-space: nowrap; }
             .nf-ad-table-rules th.column-name, .nf-ad-table-rules td.column-name { width: 320px; text-align: left !important; vertical-align: middle; padding-left: 0; padding-right: 10px; }
@@ -77,38 +97,38 @@ class NF_AD_Dashboard {
             .custom-days-wrapper { display: inline-flex; align-items: center; gap: 5px; }
             .custom-days-input { width: 70px !important; }
 
-            /* --- Modals & Lists --- */
+            /* --- Modals & Listen --- */
             .nf-ad-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; display: none; justify-content: center; align-items: center; }
             .nf-ad-modal { background: #fff; width: 500px; max-width: 90%; padding: 30px; border-radius: 4px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
             .nf-ad-progress-list { max-height: 300px; overflow-y: auto; margin: 20px 0; border: 1px solid #ddd; background: #f9f9f9; padding: 10px; list-style: none; }
             .nf-ad-progress-list li { padding: 5px; border-bottom: 1px solid #eee; font-size: 13px; display: flex; align-items: center; }
             
-            /* --- Settings & Logs --- */
+            /* --- Einstellungen & Logs --- */
             .nf-ad-radio-group label { display: inline-flex; align-items: center; gap: 6px; margin-right: 30px; margin-bottom: 8px; font-weight: 400; }
-            /* Ultra-spezifisch: Nur ID-Spalte der Fristen-Tabelle */
+            /* Nur ID-Spalte der Fristen-Tabelle */
 			.nf-ad-table-rules thead th:nth-child(1), 
 			.nf-ad-table-rules tbody td:nth-child(1) { width: 20px !important; min-width: 20px !important; }
-            /* FIX 1: Spaltenbreiten & Ausrichtung (ENTKOPPELT) */
+            /* Spaltenbreiten & Ausrichtung */
             
-            /* Status Spalte (Beide Links) */
+            /* Status-Spalte (beide Tabellen) */
             .wp-list-table thead th:nth-child(1), 
             .wp-list-table tbody td:nth-child(1) { width: 90px; } 
             
-            /* Zeitpunkt Spalte - HIER IST DER FIX */
-            /* Header: Standard LINKS (verhindert das Icon-Verschieben Problem) */
+            /* Zeitpunkt-Spalte */
+            /* Header: links ausrichten (verhindert Icon-Verschiebung) */
             .wp-list-table thead th:last-child { width: 160px; text-align: left; }
             
-            /* Body: Daten RECHTS (sieht besser aus für Datum/Zahlen) */
+            /* Body: rechts ausrichten (für Datum/Zahlen) */
             .wp-list-table tbody td:last-child { width: 160px; text-align: left!important; }
             
-            /* FIX 2: Header Styling Standardisieren */
+            /* Header-Stil */
             th.sortable a { color: #3c434a; text-decoration: none; display: block; width: 100%; }
             th.sortable a:hover { color: #2271b1; }
             
-            /* Hier entfernen wir font-weight: bold */
+            /* Font-Weight vereinheitlichen */
             th.sorted a { color: #000; font-weight: 400 !important; } 
             
-            /* FIX 3: Icon-Abstand reparieren */
+            /* Icon-Abstand (Sorting) */
             th.sorted a:after { 
                 content: "\f140"; 
                 font-family: dashicons; 
@@ -121,9 +141,16 @@ class NF_AD_Dashboard {
         </style>
         <?php
     }
-    // -----------------------------------------------------------------------------
-    // Dashboard Page Renderer (Tabs)
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // DASHBOARD PAGE (TABS)
+    // =============================================================================
+
+    /* --- Renderer: Seite & Tabs --- */
+    /**
+     * Rendert die Dashboard-Seite inkl. Tabs und Formulare.
+     *
+     * @return void
+     */
     public static function render_page() {
         if ( ! current_user_can('manage_options') ) wp_die('Forbidden');
         self::handle_save();
@@ -356,9 +383,16 @@ class NF_AD_Dashboard {
         <?php
     }
 
-    // -----------------------------------------------------------------------------
-    // Tab Renderer: Log
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // TAB: LOG
+    // =============================================================================
+
+    /* --- Renderer: Log-Tab --- */
+    /**
+     * Rendert den Log-Tab (Cron-Monitor und Löschprotokoll).
+     *
+     * @return void
+     */
     private static function render_logs_tab() {
         $paged_logs = isset( $_GET['paged_logs'] ) ? max( 1, intval( $_GET['paged_logs'] ) ) : 1;
         $orderby = isset( $_GET['orderby'] ) ? sanitize_text_field( $_GET['orderby'] ) : 'time';
@@ -458,7 +492,7 @@ class NF_AD_Dashboard {
                         <td>
                             <?php
                             $msg = esc_html( $log['message'] );
-                            // Highlighting for known action/status tags (safe because we escape first)
+                            // Hervorhebung bekannter Status-Tags (sicher, da zuvor escaped wird).
                             $replacements = [
                                 '[CRON]'   => '<strong style="color:#2563eb">[CRON]</strong>',
                                 '[MANUAL]' => '<strong style="color:#86198f">[MANUAL]</strong>',
@@ -484,9 +518,16 @@ class NF_AD_Dashboard {
         <?php
     }
 
-    // -----------------------------------------------------------------------------
-    // Settings Persistence (POST Handler)
-    // -----------------------------------------------------------------------------
+    // =============================================================================
+    // SETTINGS PERSISTENZ (POST HANDLER)
+    // =============================================================================
+
+    /* --- Persistenz: Einstellungen speichern --- */
+    /**
+     * Persistiert Einstellungen und Regeln aus POST-Requests.
+     *
+     * @return void
+     */
     private static function handle_save() {
         if ( ! isset( $_POST['nf_ad_nonce'] ) || ! wp_verify_nonce( $_POST['nf_ad_nonce'], 'nf_ad_save_settings' ) ) return;
         $settings = get_option( self::OPTION_KEY, [] );
@@ -530,21 +571,40 @@ class NF_AD_Dashboard {
         add_settings_error( 'nf_ad', 'saved', 'Einstellungen gespeichert.', 'updated' );
     }
 
-    public static function get_settings() { return get_option( self::OPTION_KEY, [] ); }
-    
-    // -----------------------------------------------------------------------------
-    // AJAX Handler
-    // -----------------------------------------------------------------------------
-    public static function ajax_retry_delete() { 
+    // =============================================================================
+    // SETTINGS PERSISTENZ (POST HANDLER)
+    // =============================================================================
+
+    /* --- Getter --- */
+    /**
+     * Liefert die Plugin-Einstellungen.
+     *
+     * @return array
+     */
+    public static function get_settings() {
+        return get_option( self::OPTION_KEY, [] );
+    }
+
+    // =============================================================================
+    // AJAX HANDLER
+    // =============================================================================
+
+    /* --- AJAX Endpunkte --- */
+    /**
+     * AJAX: Erneuter Löschversuch für einen Eintrag inkl. optionaler Datei-Bereinigung.
+     *
+     * @return void
+     */
+    public static function ajax_retry_delete() {
         check_ajax_referer( 'nf_ad_security', 'security' );
         if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
         $id = absint($_POST['id']); if ( ! $id ) wp_send_json_error( 'No ID' );
         if ( get_post_type($id) !== 'nf_sub' ) wp_send_json_error( 'Invalid Post Type' );
 
-        // Klassen-Call korrigiert zu NF_AD_Uploads_Deleter
-        $files_deleted = NF_AD_Uploads_Deleter::cleanup_files($id); 
+        // Datei-Bereinigung über den Upload-Deleter ausführen.
+        $files_deleted = NF_AD_Uploads_Deleter::cleanup_files($id);
         $msg = $files_deleted['deleted'] > 0 ? "Files: {$files_deleted['deleted']} " : "";
-        
+
         $deleted = false;
         if(class_exists('Ninja_Forms')) {
             $nf_form = Ninja_Forms()->form();
@@ -554,41 +614,44 @@ class NF_AD_Dashboard {
             }
         }
         if(!$deleted) { if(wp_delete_post($id, true)) { $deleted = true; $msg .= '(WP)'; } }
-        $deleted ? wp_send_json_success('Gelöscht ' . $msg) : wp_send_json_error('Fehler'); 
+        $deleted ? wp_send_json_success('Gelöscht ' . $msg) : wp_send_json_error('Fehler');
     }
-    
+
+    /**
+     * AJAX: Startet die manuelle Bereinigung in Batches.
+     *
+     * @return void
+     */
     public static function ajax_force_cleanup() {
         check_ajax_referer( 'nf_ad_security', 'security' );
         if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
         $result = NF_AD_Submissions_Eraser::run_cleanup_manual();
         wp_send_json_success( $result );
     }
-    
-    public static function ajax_clear_logs() { 
-        check_ajax_referer( 'nf_ad_security', 'security' );
-        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
-        NF_AD_Logger::truncate(); wp_send_json_success(); 
-        /**
-         * AJAX Handler: Clear logs
-         *
-         * @return void
-         */
-    }
 
-    public static function ajax_calculate() {
     /**
-     * AJAX Handler: Calculate dry run
+     * AJAX: Leert alle Logs.
      *
      * @return void
      */
+    public static function ajax_clear_logs() {
+        check_ajax_referer( 'nf_ad_security', 'security' );
+        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
+        NF_AD_Logger::truncate();
+        wp_send_json_success();
+    }
+
+    /**
+     * AJAX: Berechnet eine Simulation (Dry Run) für Einträge oder Uploads.
+     *
+     * @return void
+     */
+    public static function ajax_calculate() {
         check_ajax_referer( 'nf_ad_security', 'security' );
         if(!current_user_can('manage_options')) wp_send_json_error();
+        // Berechnungstyp: "subs" (Einträge) oder "files" (Uploads).
         $type = sanitize_key($_POST['type'] ?? 'subs');
-
-        /**
-         * Type of dry run calculation
-         * @var string $type
-         */
+        // Simulation durchführen (ohne Löschung).
         $count = NF_AD_Submissions_Eraser::calculate_dry_run($type);
         wp_send_json_success( ['count' => $count, 'type' => $type] );
     }
