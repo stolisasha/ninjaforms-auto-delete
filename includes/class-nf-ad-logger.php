@@ -39,10 +39,7 @@ class NF_AD_Logger {
      * @return void
      */
     public static function maybe_update_db() {
-        if ( ! current_user_can( 'manage_options' ) ) {
-            return;
-        }
-        if ( get_option( 'nf_ad_db_version' ) != NF_AD_DB_VERSION ) {
+        if ( get_option( 'nf_ad_db_version' ) !== NF_AD_DB_VERSION ) {
             self::install_table();
             update_option( 'nf_ad_db_version', NF_AD_DB_VERSION );
         }
@@ -58,8 +55,11 @@ class NF_AD_Logger {
         require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
         $charset = $wpdb->get_charset_collate();
 
+        $logs_table = $wpdb->prefix . self::TABLE_LOGS;
+        $runs_table = $wpdb->prefix . self::TABLE_RUNS;
+
         // dbDelta-Kompatibilität: keine Engine-Angabe in der CREATE TABLE Definition.
-        dbDelta( "CREATE TABLE {$wpdb->prefix}" . self::TABLE_LOGS . " (
+        dbDelta( "CREATE TABLE $logs_table (
             id mediumint(9) NOT NULL AUTO_INCREMENT,
             time datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
             form_id mediumint(9) NOT NULL,
@@ -71,7 +71,7 @@ class NF_AD_Logger {
             PRIMARY KEY  (id), KEY form_id (form_id), KEY status (status), KEY time (time)
         ) $charset;" );
 
-        dbDelta( "CREATE TABLE {$wpdb->prefix}" . self::TABLE_RUNS . " (
+        dbDelta( "CREATE TABLE $runs_table (
             id mediumint(9) NOT NULL AUTO_INCREMENT,
             time datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
             status varchar(20) NOT NULL,
@@ -116,7 +116,8 @@ class NF_AD_Logger {
                 'submission_date' => $sdate,
                 'status'          => $status,
                 'message'         => $msg,
-            ]
+            ],
+            [ '%s', '%d', '%s', '%d', '%s', '%s', '%s' ]
         );
     }
 
@@ -136,15 +137,17 @@ class NF_AD_Logger {
     public static function start_run( $msg = 'Bereinigung gestartet...' ) {
         global $wpdb;
         $table = $wpdb->prefix . self::TABLE_RUNS;
+        $logs_table = $wpdb->prefix . self::TABLE_LOGS;
 
-        // Sicherstellen, dass die Tabelle vor dem Schreiben existiert (z. B. bei CLI/Cron).
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( empty( $exists ) ) {
+        // Sicherstellen, dass beide Tabellen vor dem Schreiben existieren (z. B. bei CLI/Cron).
+        $exists_runs = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+        $exists_logs = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $logs_table ) );
+        if ( empty( $exists_runs ) || empty( $exists_logs ) ) {
             self::install_table();
         }
 
         // Zeitstempel auf Basis der WordPress-Zeit für den Timeout-Check.
-        $one_hour_ago = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - HOUR_IN_SECONDS );
+        $one_hour_ago = wp_date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - HOUR_IN_SECONDS );
 
         $wpdb->query(
             $wpdb->prepare(
@@ -158,7 +161,8 @@ class NF_AD_Logger {
                 'time'    => current_time( 'mysql' ),
                 'status'  => 'running',
                 'message' => $msg,
-            ]
+            ],
+            [ '%s', '%s', '%s' ]
         );
         return $wpdb->insert_id;
     }
@@ -198,7 +202,9 @@ class NF_AD_Logger {
                 'status'  => $status,
                 'message' => $msg,
             ],
-            [ 'id' => $run_id ]
+            [ 'id' => $run_id ],
+            [ '%s', '%s' ],
+            [ '%d' ]
         );
         self::cleanup_runs( 50 );
     }
@@ -224,9 +230,10 @@ class NF_AD_Logger {
         $offset = ( $page - 1 ) * $limit;
         $table = $wpdb->prefix . self::TABLE_LOGS;
         $allowed = [ 'time', 'form_title', 'submission_id', 'status', 'submission_date', 'message' ];
-        if ( ! in_array( $orderby, $allowed ) ) {
+        if ( ! in_array( $orderby, $allowed, true ) ) {
             $orderby = 'time';
         }
+        $order = strtoupper( (string) $order );
         return $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT * FROM $table ORDER BY $orderby " . ( $order === 'ASC' ? 'ASC' : 'DESC' ) . " LIMIT %d OFFSET %d",
@@ -259,9 +266,10 @@ class NF_AD_Logger {
         }
 
         $allowed = [ 'time', 'status', 'message' ];
-        if ( ! in_array( $orderby, $allowed ) ) {
+        if ( ! in_array( $orderby, $allowed, true ) ) {
             $orderby = 'time';
         }
+        $order = strtoupper( (string) $order );
         return $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT * FROM $table ORDER BY $orderby " . ( $order === 'ASC' ? 'ASC' : 'DESC' ) . " LIMIT %d OFFSET %d",
@@ -279,7 +287,8 @@ class NF_AD_Logger {
      */
     public static function count_logs() {
         global $wpdb;
-        return $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}" . self::TABLE_LOGS );
+        $table = $wpdb->prefix . self::TABLE_LOGS;
+        return (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table" );
     }
 
     /**
@@ -290,7 +299,7 @@ class NF_AD_Logger {
     public static function count_cron_logs() {
         global $wpdb;
         $t = $wpdb->prefix . self::TABLE_RUNS;
-        return $wpdb->get_var( "SELECT COUNT(*) FROM $t" );
+        return (int) $wpdb->get_var( "SELECT COUNT(*) FROM $t" );
     }
 
     // =============================================================================
@@ -306,8 +315,18 @@ class NF_AD_Logger {
      */
     public static function truncate() {
         global $wpdb;
-        $wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}" . self::TABLE_LOGS );
-        $wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}" . self::TABLE_RUNS );
+        $logs_table = $wpdb->prefix . self::TABLE_LOGS;
+        $runs_table = $wpdb->prefix . self::TABLE_RUNS;
+
+        $logs_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $logs_table ) );
+        if ( ! empty( $logs_exists ) ) {
+            $wpdb->query( "TRUNCATE TABLE $logs_table" );
+        }
+
+        $runs_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $runs_table ) );
+        if ( ! empty( $runs_exists ) ) {
+            $wpdb->query( "TRUNCATE TABLE $runs_table" );
+        }
     }
 
     /**
@@ -320,17 +339,21 @@ class NF_AD_Logger {
     public static function cleanup_logs( $keep ) {
         global $wpdb;
         $keep = max( 10, absint( $keep ) );
+        $keep = (int) $keep;
         $table = $wpdb->prefix . self::TABLE_LOGS;
         $total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table" );
         if ( $total <= $keep ) {
             return;
         }
-        $wpdb->query(
+        $threshold_id = (int) $wpdb->get_var(
             $wpdb->prepare(
-                "DELETE FROM $table WHERE id <= ( SELECT id FROM ( SELECT id FROM $table ORDER BY id DESC LIMIT 1 OFFSET %d ) foo )",
+                "SELECT id FROM $table ORDER BY id DESC LIMIT 1 OFFSET %d",
                 $keep
             )
         );
+        if ( $threshold_id > 0 ) {
+            $wpdb->query( $wpdb->prepare( "DELETE FROM $table WHERE id <= %d", $threshold_id ) );
+        }
     }
 
     /**
@@ -343,16 +366,21 @@ class NF_AD_Logger {
      */
     public static function cleanup_runs( $keep = 50 ) {
         global $wpdb;
+        $keep = max( 10, absint( $keep ) );
+        $keep = (int) $keep;
         $table = $wpdb->prefix . self::TABLE_RUNS;
         $total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table" );
         if ( $total <= $keep ) {
             return;
         }
-        $wpdb->query(
+        $threshold_id = (int) $wpdb->get_var(
             $wpdb->prepare(
-                "DELETE FROM $table WHERE id <= ( SELECT id FROM ( SELECT id FROM $table ORDER BY id DESC LIMIT 1 OFFSET %d ) foo ) AND status != 'running'",
+                "SELECT id FROM $table ORDER BY id DESC LIMIT 1 OFFSET %d",
                 $keep
             )
         );
+        if ( $threshold_id > 0 ) {
+            $wpdb->query( $wpdb->prepare( "DELETE FROM $table WHERE id <= %d AND status != %s", $threshold_id, 'running' ) );
+        }
     }
 }

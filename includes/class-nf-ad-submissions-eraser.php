@@ -35,6 +35,23 @@ class NF_AD_Submissions_Eraser {
     static $upload_keys_cache = [];
 
     // =============================================================================
+    // HILFSMETHODEN
+    // =============================================================================
+
+    /**
+     * Build a deterministic cutoff datetime string (site timezone) for date_query.
+     *
+     * @param int $days Cutoff in days.
+     *
+     * @return string
+     */
+    private static function get_cutoff_datetime( $days ) {
+        $days      = max( 1, absint( $days ) );
+        $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
+        return wp_date( 'Y-m-d H:i:s', $threshold );
+    }
+
+    // =============================================================================
     // ENTRYPOINTS
     // =============================================================================
 
@@ -73,78 +90,81 @@ class NF_AD_Submissions_Eraser {
      *
      * @return int
      */
-    public static function calculate_dry_run($type = 'subs') {
-        global $wpdb;
+    public static function calculate_dry_run( $type = 'subs' ) {
         $settings = NF_AD_Dashboard::get_settings();
 
         // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
         $sub_action = $settings['sub_handling'] ?? 'keep';
-        
-        $global = (int)($settings['global'] ?? 365);
-        $forms = Ninja_Forms()->form()->get_forms();
+
+        $global     = (int) ( $settings['global'] ?? 365 );
+        $forms      = Ninja_Forms()->form()->get_forms();
         $total_count = 0;
 
-        foreach($forms as $form) {
-            $rule = $settings['forms'][$form->get_id()] ?? ['mode'=>'global'];
-            if($rule['mode'] === 'never') continue;
-            $days = ($rule['mode'] === 'custom') ? (int)$rule['days'] : $global;
-            if($days < 1) $days = 365;
-
-            // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
-            $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
-            $date = date( 'Y-m-d H:i:s', $threshold );
-            $fid = $form->get_id();
-            
-            // Baseline-Query: Submissions vor dem Cutoff-Datum, gefiltert nach Formular-ID.
-            $sql = "SELECT COUNT(1)
-                    FROM {$wpdb->posts} p
-                    WHERE p.post_type = 'nf_sub'
-                    AND p.post_date < %s
-                    AND EXISTS (
-                        SELECT 1
-                        FROM {$wpdb->postmeta} pm
-                        WHERE pm.post_id = p.ID
-                        AND pm.meta_key = '_form_id'
-                        AND pm.meta_value = %d
-                    )";
-            // Trash nur dann ausschließen, wenn nicht endgültig gelöscht wird.
-            // Bei "delete" muss Trash inkludiert sein, damit bereits getrashte Submissions gefunden werden.
-            if ( $sub_action !== 'delete' ) {
-                $sql .= " AND p.post_status != 'trash'";
+        foreach ( $forms as $form ) {
+            $rule = $settings['forms'][ $form->get_id() ] ?? [ 'mode' => 'global' ];
+            if ( $rule['mode'] === 'never' ) {
+                continue;
             }
+            $days = ( $rule['mode'] === 'custom' ) ? (int) $rule['days'] : $global;
+            if ( $days < 1 ) {
+                $days = 365;
+            }
+            $fid   = $form->get_id();
+            $cutoff = self::get_cutoff_datetime( $days );
+
+            $args = [
+                'post_type'              => 'nf_sub',
+                'posts_per_page'         => 1,
+                'fields'                 => 'ids',
+                'no_found_rows'          => false,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'ignore_sticky_posts'    => true,
+                'suppress_filters'       => false,
+                'date_query'             => [
+                    [
+                        'column'    => 'post_date',
+                        'before'    => $cutoff,
+                        'inclusive' => true,
+                    ],
+                ],
+                'meta_query'             => [
+                    [
+                        'key'     => '_form_id',
+                        'value'   => $fid,
+                        'compare' => '=',
+                    ],
+                ],
+                'post_status'            => ( $sub_action === 'delete' )
+                    ? array_keys( get_post_stati() )
+                    : array_values( array_diff( array_keys( get_post_stati() ), array( 'trash' ) ) ),
+            ];
 
             if ( $type === 'files' ) {
                 // Upload-Field-Keys einmalig pro Formular ermitteln und cachen.
-                if(!isset(self::$upload_keys_cache[$fid])) {
-                    self::$upload_keys_cache[$fid] = [];
-                    foreach ( Ninja_Forms()->form($fid)->get_fields() as $f ) {
-                        if ( $f->get_setting('type') === 'file_upload' ) {
-                            self::$upload_keys_cache[$fid][] = '_field_' . $f->get_id();
+                if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
+                    self::$upload_keys_cache[ $fid ] = [];
+                    foreach ( Ninja_Forms()->form( $fid )->get_fields() as $f ) {
+                        if ( $f->get_setting( 'type' ) === 'file_upload' ) {
+                            self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
                         }
                     }
                 }
-                $upload_meta_keys = self::$upload_keys_cache[$fid];
-
-                if ( empty($upload_meta_keys) ) continue; 
-
-                // Dynamische IN-Liste für Meta-Keys (prepared placeholders).
-                $placeholders = implode(',', array_fill(0, count($upload_meta_keys), '%s'));
-
-                // Nur Submissions zählen, die mindestens ein Upload-Feld mit Inhalt besitzen.
-                $sql .= " AND EXISTS (
-                    SELECT 1 FROM {$wpdb->postmeta} pm2
-                    WHERE pm2.post_id = p.ID
-                    AND pm2.meta_key IN ($placeholders)
-                    AND pm2.meta_value != ''
-                )";
-
-                $params = array_merge( [$date, $fid], $upload_meta_keys );
-                $count = $wpdb->get_var( $wpdb->prepare($sql, ...$params) );
-            } else {
-                $count = $wpdb->get_var( $wpdb->prepare($sql, $date, $fid) );
+                $upload_keys = self::$upload_keys_cache[ $fid ];
+                if ( empty( $upload_keys ) ) {
+                    continue;
+                }
+                // OR-Filter: mindestens ein Upload-Feld darf nicht leer sein.
+                $meta_or = [ 'relation' => 'OR' ];
+                foreach ( $upload_keys as $k ) {
+                    $meta_or[] = [ 'key' => $k, 'value' => '', 'compare' => '!=' ];
+                }
+                $args['meta_query'][] = $meta_or;
             }
-            
-            $total_count += (int)$count;
+
+            $q = new WP_Query( $args );
+            $total_count += (int) $q->found_posts;
+            wp_reset_postdata();
         }
         return $total_count;
     }
@@ -253,33 +273,49 @@ class NF_AD_Submissions_Eraser {
      */
     private static function process_form( $fid, $days, $sub_action, $file_action ) {
         // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
-        $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
-        $date = date( 'Y-m-d H:i:s', $threshold );
-        
-        // Basis-Query: Submissions vor Cutoff-Datum für das konkrete Formular (Batch-Limit).
+        $cutoff = self::get_cutoff_datetime( $days );
         $query_args = [
-            'post_type' => 'nf_sub',
-            'posts_per_page' => self::BATCH_LIMIT,
-            'fields' => 'ids',
-            'date_query' => [['column'=>'post_date','before'=>$date]],
-            'meta_query' => [['key'=>'_form_id','value'=>$fid]]
+            'post_type'              => 'nf_sub',
+            'posts_per_page'         => self::BATCH_LIMIT,
+            'fields'                 => 'ids',
+            'date_query'             => [
+                [
+                    'column'    => 'post_date',
+                    'before'    => $cutoff,
+                    'inclusive' => true,
+                ],
+            ],
+            'meta_query'             => [
+                [
+                    'key'   => '_form_id',
+                    'value' => $fid,
+                ],
+            ],
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => false,
+            'update_post_term_cache' => false,
+            'ignore_sticky_posts'    => true,
         ];
 
         if ( $sub_action === 'keep' && $file_action === 'delete' ) {
             // Sonderfall: Submissions bleiben, aber Uploads sollen gelöscht werden. Dafür nur Submissions mit Upload-Meta selektieren.
-            if(!isset(self::$upload_keys_cache[$fid])) {
-                self::$upload_keys_cache[$fid] = [];
-                foreach ( Ninja_Forms()->form($fid)->get_fields() as $f ) {
-                    if ( $f->get_setting('type') === 'file_upload' ) self::$upload_keys_cache[$fid][] = '_field_' . $f->get_id();
+            if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
+                self::$upload_keys_cache[ $fid ] = [];
+                foreach ( Ninja_Forms()->form( $fid )->get_fields() as $f ) {
+                    if ( $f->get_setting( 'type' ) === 'file_upload' ) {
+                        self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
+                    }
                 }
             }
-            $upload_keys = self::$upload_keys_cache[$fid];
+            $upload_keys = self::$upload_keys_cache[ $fid ];
 
-            if(empty($upload_keys)) return ['count'=>0,'errors'=>0,'warnings'=>0]; 
+            if ( empty( $upload_keys ) ) {
+                return [ 'count' => 0, 'errors' => 0, 'warnings' => 0 ];
+            }
 
             // OR-Filter: mindestens ein Upload-Feld darf nicht leer sein.
-            $meta_or = ['relation' => 'OR'];
-            foreach($upload_keys as $k) {
+            $meta_or = [ 'relation' => 'OR' ];
+            foreach ( $upload_keys as $k ) {
                 $meta_or[] = [ 'key' => $k, 'value' => '', 'compare' => '!=' ];
             }
             $query_args['meta_query'][] = $meta_or;
@@ -288,30 +324,32 @@ class NF_AD_Submissions_Eraser {
         // Post-Status Handling:
         // Bei "delete" auch Trash einbeziehen (GDPR/DSGVO: bereits getrashte Submissions müssen bereinigt werden).
         // Bei "trash"/"keep" Trash ausschließen (Performance, da bereits verarbeitet).
-        $all_statuses = array_keys( get_post_stati() );
         if ( $sub_action === 'delete' ) {
-            $query_args['post_status'] = $all_statuses; // include trash
+            $query_args['post_status'] = array_keys( get_post_stati() );
         } else {
-            $query_args['post_status'] = array_values( array_diff( $all_statuses, ['trash'] ) );
+            $query_args['post_status'] = array_values( array_diff( array_keys( get_post_stati() ), array( 'trash' ) ) );
         }
 
         // IDs abrufen (nur IDs, keine Post-Objekte), um Memory-Overhead zu minimieren.
-        $ids = get_posts($query_args);
-        
-        $result = ['count'=>0, 'errors'=>0, 'warnings'=>0];
-        if(empty($ids)) return $result;
+        $q   = new WP_Query( $query_args );
+        $ids = $q->posts;
+        wp_reset_postdata();
+
+        $result = [ 'count' => 0, 'errors' => 0, 'warnings' => 0 ];
+        if ( empty( $ids ) ) {
+            return $result;
+        }
 
         // Pro Submission: optional Dateien bereinigen, dann Submission-Aktion ausführen und Ergebnis loggen.
         foreach ( $ids as $id ) {
-            $stat = 'success';
-            $sub_date = get_post_field( 'post_date', $id );
-
+            $stat        = 'success';
+            $sub_date    = get_post_field( 'post_date', $id );
             $files_deleted = 0;
             $file_errors   = 0;
 
             // 1) Datei-Bereinigung (optional, abhängig von file_action).
             if ( $file_action === 'delete' && class_exists( 'NF_AD_Uploads_Deleter' ) ) {
-                $f_res = NF_AD_Uploads_Deleter::cleanup_files( $id );
+                $f_res        = NF_AD_Uploads_Deleter::cleanup_files( $id );
                 $files_deleted = (int) ( $f_res['deleted'] ?? 0 );
                 $file_errors   = (int) ( $f_res['errors'] ?? 0 );
 
@@ -328,23 +366,8 @@ class NF_AD_Submissions_Eraser {
             if ( $sub_action === 'delete' ) {
                 $action_tag = '[DELETE]';
 
-                $deleted = false;
-                if ( class_exists( 'Ninja_Forms' ) ) {
-                    $nf_form = Ninja_Forms()->form();
-                    if ( method_exists( $nf_form, 'get_sub' ) ) {
-                        $sub_obj = $nf_form->get_sub( $id );
-                        if ( $sub_obj ) {
-                            $sub_obj->delete();
-                            $deleted = true;
-                        }
-                    }
-                }
-
-                if ( ! $deleted ) {
-                    if ( wp_delete_post( $id, true ) ) {
-                        $deleted = true;
-                    }
-                }
+                // Use core wp_delete_post only.
+                $deleted = (bool) wp_delete_post( $id, true );
 
                 if ( $deleted ) {
                     if ( $file_action === 'delete' ) {

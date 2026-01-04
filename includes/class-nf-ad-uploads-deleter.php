@@ -110,11 +110,13 @@ class NF_AD_Uploads_Deleter {
         }
 
         $path = '';
-        if ( file_exists( $val ) ) {
-            $path = $val;
-        } elseif ( strpos( $val, 'http' ) !== false ) {
-            $clean_url = strtok( $val, '?' );
-            $path = self::url_to_path( $clean_url );
+        if ( is_string( $val ) && $val !== '' ) {
+            if ( file_exists( $val ) ) {
+                $path = $val;
+            } elseif ( strpos( $val, 'http' ) !== false ) {
+                $clean_url = strtok( $val, '?' );
+                $path = self::url_to_path( $clean_url );
+            }
         }
 
         // Pfad auflösen und Existenz prüfen, bevor Sicherheitschecks starten.
@@ -133,16 +135,18 @@ class NF_AD_Uploads_Deleter {
             $upload_dir = wp_upload_dir();
             $real_base = realpath( $upload_dir['basedir'] );
 
-            if ( $real_base && $real_path && strpos( $real_path, $real_base ) === 0 ) {
-                if ( is_writable( $real_path ) ) {
-                    if ( unlink( $real_path ) ) {
-                        $stats['deleted']++;
-                    } else {
-                        $stats['errors']++;
-                    }
+            // Nach realpath, dann normalisieren für Vergleich
+            $real_path = $real_path ? wp_normalize_path( $real_path ) : '';
+            $real_base = $real_base ? trailingslashit( wp_normalize_path( $real_base ) ) : '';
+
+            $check_path = trailingslashit( $real_path );
+            if ( $real_base && $real_path && 0 === strpos( $check_path, $real_base ) ) {
+                wp_delete_file( $real_path );
+
+                if ( ! file_exists( $real_path ) ) {
+                    $stats['deleted']++;
                 } else {
                     $stats['errors']++;
-                    // Keine Schreibrechte auf die Datei.
                 }
             } else {
                 // Pfad liegt außerhalb des Upload-Verzeichnisses: aus Sicherheitsgründen abbrechen.
@@ -167,6 +171,10 @@ class NF_AD_Uploads_Deleter {
      */
     private static function url_to_path( $url ) {
         $d = wp_upload_dir();
-        return str_replace( $d['baseurl'], $d['basedir'], $url );
+        $baseurl = $d['baseurl'];
+        if ( is_string( $url ) && $baseurl && 0 === strpos( $url, $baseurl ) ) {
+            return str_replace( $baseurl, $d['basedir'], $url );
+        }
+        return '';
     }
 }

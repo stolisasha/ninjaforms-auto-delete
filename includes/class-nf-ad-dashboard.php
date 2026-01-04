@@ -166,26 +166,34 @@ class NF_AD_Dashboard {
      * @return void
      */
     public static function render_page() {
-        if ( ! current_user_can('manage_options') ) wp_die('Forbidden');
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( esc_html__( 'Forbidden', 'nf-auto-delete' ) );
+        }
         self::handle_save();
         $active_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'logs';
         $settings = get_option( self::OPTION_KEY, [] );
         
-        $sub_handling = isset($settings['sub_handling']) ? $settings['sub_handling'] : 'keep';
-        $file_handling = isset($settings['file_handling']) ? $settings['file_handling'] : 'keep';
-        $log_limit = isset( $settings['log_limit'] ) ? (int) $settings['log_limit'] : 256;
-        $cron_active = isset($settings['cron_active']) ? $settings['cron_active'] : false;
-        $cron_hour   = isset($settings['cron_hour']) ? (int)$settings['cron_hour'] : 3;
-        $global_days = isset( $settings['global'] ) ? (int) $settings['global'] : 365;
-        $form_rules = isset( $settings['forms'] ) ? $settings['forms'] : [];
+        $sub_handling  = sanitize_key( $settings['sub_handling'] ?? 'keep' );
+        $file_handling = sanitize_key( $settings['file_handling'] ?? 'keep' );
+        $log_limit     = isset( $settings['log_limit'] ) ? (int) $settings['log_limit'] : 256;
+        $cron_active   = ! empty( $settings['cron_active'] );
+        $cron_hour     = isset( $settings['cron_hour'] ) ? (int) $settings['cron_hour'] : 3;
+        $global_days   = isset( $settings['global'] ) ? (int) $settings['global'] : 365;
+        $form_rules    = isset( $settings['forms'] ) && is_array( $settings['forms'] ) ? $settings['forms'] : [];
         ?>
         <div class="wrap">
             <h1>Auto Delete for Ninja Forms</h1>
             <?php settings_errors('nf_ad'); ?>
+            <?php
+            $base_url = add_query_arg( [ 'page' => 'nf-auto-delete' ], admin_url( 'admin.php' ) );
+            $tab_logs_url = add_query_arg( [ 'tab' => 'logs' ], $base_url );
+            $tab_rules_url = add_query_arg( [ 'tab' => 'rules' ], $base_url );
+            $tab_settings_url = add_query_arg( [ 'tab' => 'settings' ], $base_url );
+            ?>
             <nav class="nav-tab-wrapper">
-                <a href="?page=nf-auto-delete&tab=logs" class="nav-tab <?php echo $active_tab == 'logs' ? 'nav-tab-active' : ''; ?>">Log</a>
-                <a href="?page=nf-auto-delete&tab=rules" class="nav-tab <?php echo $active_tab == 'rules' ? 'nav-tab-active' : ''; ?>">Fristen definieren</a>
-                <a href="?page=nf-auto-delete&tab=settings" class="nav-tab <?php echo $active_tab == 'settings' ? 'nav-tab-active' : ''; ?>">Einstellungen</a>
+                <a href="<?php echo esc_url( $tab_logs_url ); ?>" class="nav-tab <?php echo $active_tab === 'logs' ? 'nav-tab-active' : ''; ?>">Log</a>
+                <a href="<?php echo esc_url( $tab_rules_url ); ?>" class="nav-tab <?php echo $active_tab === 'rules' ? 'nav-tab-active' : ''; ?>">Fristen definieren</a>
+                <a href="<?php echo esc_url( $tab_settings_url ); ?>" class="nav-tab <?php echo $active_tab === 'settings' ? 'nav-tab-active' : ''; ?>">Einstellungen</a>
             </nav>
 
             <div id="batch-modal" class="nf-ad-modal-overlay">
@@ -249,22 +257,22 @@ class NF_AD_Dashboard {
                                 <?php 
                                 $forms = Ninja_Forms()->form()->get_forms();
                                 if ( empty( $forms ) ) : ?><tr><td colspan="3">Keine Formulare.</td></tr>
-                                <?php else : foreach ( $forms as $form ) : 
+                                <?php else : foreach ( $forms as $form ) :
                                         $id = $form->get_id();
                                         $rule = isset( $form_rules[$id] ) ? $form_rules[$id] : [ 'mode' => 'global', 'days' => '' ];
                                 ?>
                                     <tr>
-                                        <td class="column-id">#<?php echo $id; ?></td>
+                                        <td class="column-id">#<?php echo esc_html( $id ); ?></td>
                                         <td class="column-name"><strong><?php echo esc_html( $form->get_setting( 'title' ) ); ?></strong></td>
                                         <td class="column-rule">
                                             <div class="nf-ad-rule-cell-content">
-                                                <select name="forms[<?php echo $id; ?>][mode]" onchange="toggleCustomInput(this, 'custom-container-<?php echo $id; ?>')">
-                                                    <option value="global" <?php selected( $rule['mode'], 'global' ); ?>>Globaler Standard (<?php echo $global_days; ?> Tage)</option>
-                                                    <option value="never" <?php selected( $rule['mode'], 'never' ); ?>>Niemals löschen</option>
-                                                    <option value="custom" <?php selected( $rule['mode'], 'custom' ); ?>>Individuell</option>
+                                                <select name="forms[<?php echo esc_attr( $id ); ?>][mode]" onchange="toggleCustomInput(this, 'custom-container-<?php echo esc_attr( $id ); ?>')">
+                                                    <option value="global" <?php selected( $rule['mode'] ?? 'global', 'global' ); ?>>Globaler Standard (<?php echo esc_html( absint( $global_days ) ); ?> Tage)</option>
+                                                    <option value="never" <?php selected( $rule['mode'] ?? 'global', 'never' ); ?>>Niemals löschen</option>
+                                                    <option value="custom" <?php selected( $rule['mode'] ?? 'global', 'custom' ); ?>>Individuell</option>
                                                 </select>
-                                                <span id="custom-container-<?php echo $id; ?>" class="custom-days-wrapper <?php echo $rule['mode'] !== 'custom' ? 'hidden' : ''; ?>">
-                                                    <input type="number" name="forms[<?php echo $id; ?>][days]" value="<?php echo esc_attr( $rule['days'] ); ?>" class="custom-days-input" placeholder="365"> Tage
+                                                <span id="custom-container-<?php echo esc_attr( $id ); ?>" class="custom-days-wrapper <?php echo ( ( $rule['mode'] ?? 'global' ) !== 'custom' ? 'hidden' : '' ); ?>">
+                                                    <input type="number" name="forms[<?php echo esc_attr( $id ); ?>][days]" value="<?php echo esc_attr( $rule['days'] ); ?>" class="custom-days-input" placeholder="365"> Tage
                                                 </span>
                                             </div>
                                         </td>
@@ -409,8 +417,8 @@ class NF_AD_Dashboard {
      */
     private static function render_logs_tab() {
         $paged_logs = isset( $_GET['paged_logs'] ) ? max( 1, intval( $_GET['paged_logs'] ) ) : 1;
-        $orderby = isset( $_GET['orderby'] ) ? sanitize_text_field( $_GET['orderby'] ) : 'time';
-        $order = isset( $_GET['order'] ) ? sanitize_text_field( $_GET['order'] ) : 'DESC';
+        $orderby = isset( $_GET['orderby'] ) ? sanitize_key( $_GET['orderby'] ) : 'time';
+        $order = isset( $_GET['order'] ) ? sanitize_key( $_GET['order'] ) : 'DESC';
         $logs = NF_AD_Logger::get_logs( 20, $paged_logs, $orderby, $order );
         $total_logs = NF_AD_Logger::count_logs();
         $total_pages = ceil( $total_logs / 20 );
@@ -419,15 +427,32 @@ class NF_AD_Dashboard {
         $cron_runs = NF_AD_Logger::get_cron_logs( 10, $paged_cron, $orderby, $order );
         $total_runs = NF_AD_Logger::count_cron_logs();
         $total_pages_cron = ceil( $total_runs / 10 );
+
+        $base_logs_url = add_query_arg( [ 'page' => 'nf-auto-delete', 'tab' => 'logs' ], admin_url( 'admin.php' ) );
         ?>
         <div class="nf-ad-headline-row"><h2>Ausführungen (Cron Monitor)</h2></div>
         <div class="tablenav top">
             <div class="alignleft actions"><button type="button" class="button nf-ad-clear-all-logs">Log leeren</button></div>
-            <div class="tablenav-pages"><span class="displaying-num"><?php echo $total_runs; ?> Einträge</span>
+            <div class="tablenav-pages"><span class="displaying-num"><?php echo esc_html( $total_runs ); ?> Einträge</span>
                 <?php if($total_pages_cron > 1): ?>
                     <span class="pagination-links">
-                        <a class="button" href="?page=nf-auto-delete&tab=logs&paged_cron=<?php echo max(1, $paged_cron-1); ?>&paged_logs=<?php echo $paged_logs; ?>">&lsaquo;</a> 
-                        <a class="button" href="?page=nf-auto-delete&tab=logs&paged_cron=<?php echo min($total_pages_cron, $paged_cron+1); ?>&paged_logs=<?php echo $paged_logs; ?>">&rsaquo;</a>
+                        <?php
+                        // Prev and next links for cron runs
+                        $prev_cron_url = add_query_arg( [
+                            'paged_cron' => max( 1, $paged_cron - 1 ),
+                            'paged_logs' => $paged_logs,
+                            'orderby'    => $orderby,
+                            'order'      => $order,
+                        ], $base_logs_url );
+                        $next_cron_url = add_query_arg( [
+                            'paged_cron' => min( $total_pages_cron, $paged_cron + 1 ),
+                            'paged_logs' => $paged_logs,
+                            'orderby'    => $orderby,
+                            'order'      => $order,
+                        ], $base_logs_url );
+                        ?>
+                        <a class="button" href="<?php echo esc_url( $prev_cron_url ); ?>">&lsaquo;</a>
+                        <a class="button" href="<?php echo esc_url( $next_cron_url ); ?>">&rsaquo;</a>
                     </span>
                 <?php endif; ?>
             </div>
@@ -438,10 +463,17 @@ class NF_AD_Dashboard {
                     <?php 
                     $cron_headers = [ 'status' => 'Status', 'message' => 'Nachricht', 'time' => 'Zeitpunkt' ];
                     foreach($cron_headers as $key => $label): 
-                        $class = ($orderby === $key) ? 'sorted ' . strtolower($order) : 'sortable'; 
+                        $class = ($orderby === $key) ? 'sorted ' . strtolower($order) : 'sortable';
+                        // Build header sort URL
+                        $header_url = add_query_arg( [
+                            'orderby'    => $key,
+                            'order'      => ( $order === 'ASC' ? 'DESC' : 'ASC' ),
+                            'paged_cron' => $paged_cron,
+                            'paged_logs' => $paged_logs,
+                        ], $base_logs_url );
                     ?>
-                        <th class="<?php echo $class; ?>">
-                            <a href="?page=nf-auto-delete&tab=logs&orderby=<?php echo $key; ?>&order=<?php echo ($order==='ASC'?'DESC':'ASC'); ?>&paged_cron=<?php echo $paged_cron; ?>&paged_logs=<?php echo $paged_logs; ?>"><span><?php echo $label; ?></span></a>
+                        <th class="<?php echo esc_attr( $class ); ?>">
+                            <a href="<?php echo esc_url( $header_url ); ?>"><span><?php echo esc_html( $label ); ?></span></a>
                         </th>
                     <?php endforeach; ?>
                 </tr>
@@ -449,7 +481,7 @@ class NF_AD_Dashboard {
             <tbody>
                 <?php if ( empty( $cron_runs ) ): ?><tr><td colspan="3">Leer.</td></tr><?php else: foreach ( $cron_runs as $run ): ?>
                     <tr>
-                        <td><span class="nf-ad-badge <?php echo $run['status']; ?>"><?php echo ucfirst( $run['status'] ); ?></span></td>
+                        <td><span class="nf-ad-badge <?php echo esc_attr( $run['status'] ); ?>"><?php echo esc_html( ucfirst( $run['status'] ) ); ?></span></td>
                         <td>
                             <?php
                             $msg = esc_html( $run['message'] );
@@ -473,10 +505,32 @@ class NF_AD_Dashboard {
         
         <hr>
         <div class="nf-ad-headline-row" style="margin-bottom: 5px;"><h2>Löschungen</h2></div>
-        <div class="tablenav top"><div class="alignleft actions"><button type="button" class="button action nf-ad-clear-all-logs">Log leeren</button></div>
-            <div class="tablenav-pages"><span class="displaying-num"><?php echo $total_logs; ?> Einträge</span>
-                <?php if($total_pages > 1): ?><span class="pagination-links"><a class="button" href="?page=nf-auto-delete&tab=logs&paged_logs=<?php echo max(1, $paged_logs-1); ?>&paged_cron=<?php echo $paged_cron; ?>">&lsaquo;</a> <a class="button" href="?page=nf-auto-delete&tab=logs&paged_logs=<?php echo min($total_pages, $paged_logs+1); ?>&paged_cron=<?php echo $paged_cron; ?>">&rsaquo;</a></span><?php endif; ?>
-            </div></div>
+        <div class="tablenav top">
+            <div class="alignleft actions"><button type="button" class="button action nf-ad-clear-all-logs">Log leeren</button></div>
+            <div class="tablenav-pages"><span class="displaying-num"><?php echo esc_html( $total_logs ); ?> Einträge</span>
+                <?php if($total_pages > 1): ?>
+                    <span class="pagination-links">
+                        <?php
+                        // Prev and next links for logs
+                        $prev_logs_url = add_query_arg( [
+                            'paged_logs' => max( 1, $paged_logs - 1 ),
+                            'paged_cron' => $paged_cron,
+                            'orderby'    => $orderby,
+                            'order'      => $order,
+                        ], $base_logs_url );
+                        $next_logs_url = add_query_arg( [
+                            'paged_logs' => min( $total_pages, $paged_logs + 1 ),
+                            'paged_cron' => $paged_cron,
+                            'orderby'    => $orderby,
+                            'order'      => $order,
+                        ], $base_logs_url );
+                        ?>
+                        <a class="button" href="<?php echo esc_url( $prev_logs_url ); ?>">&lsaquo;</a>
+                        <a class="button" href="<?php echo esc_url( $next_logs_url ); ?>">&rsaquo;</a>
+                    </span>
+                <?php endif; ?>
+            </div>
+        </div>
         <table class="wp-list-table widefat fixed striped nf-ad-table-logs">
             <thead>
                 <tr>
@@ -489,10 +543,16 @@ class NF_AD_Dashboard {
                         'time' => 'Zeitpunkt',
                     ];
                     foreach($log_headers as $key => $label): 
-                        $class = ($orderby === $key) ? 'sorted ' . strtolower($order) : 'sortable'; 
+                        $class = ($orderby === $key) ? 'sorted ' . strtolower($order) : 'sortable';
+                        $header_url = add_query_arg( [
+                            'orderby'    => $key,
+                            'order'      => ( $order === 'ASC' ? 'DESC' : 'ASC' ),
+                            'paged_logs' => $paged_logs,
+                            'paged_cron' => $paged_cron,
+                        ], $base_logs_url );
                     ?>
-                        <th class="<?php echo $class; ?>">
-                            <a href="?page=nf-auto-delete&tab=logs&orderby=<?php echo $key; ?>&order=<?php echo ($order==='ASC'?'DESC':'ASC'); ?>&paged_logs=<?php echo $paged_logs; ?>&paged_cron=<?php echo $paged_cron; ?>"><span><?php echo $label; ?></span></a>
+                        <th class="<?php echo esc_attr( $class ); ?>">
+                            <a href="<?php echo esc_url( $header_url ); ?>"><span><?php echo esc_html( $label ); ?></span></a>
                         </th>
                     <?php endforeach; ?>
                 </tr>
@@ -500,7 +560,7 @@ class NF_AD_Dashboard {
             <tbody>
                 <?php if ( empty( $logs ) ): ?><tr><td colspan="5">Keine Logs.</td></tr><?php else: foreach ( $logs as $log ): ?>
                     <tr>
-                        <td><span class="nf-ad-badge <?php echo $log['status']; ?>"><?php echo ucfirst( $log['status'] ); ?></span></td>
+                        <td><span class="nf-ad-badge <?php echo esc_attr( $log['status'] ); ?>"><?php echo esc_html( ucfirst( $log['status'] ) ); ?></span></td>
                         <td><?php echo esc_html( $log['form_title'] ); ?></td>
                         <td><?php echo esc_html( $log['submission_date'] ); ?></td>
                         <td>
@@ -543,15 +603,17 @@ class NF_AD_Dashboard {
      * @return void
      */
     private static function handle_save() {
-        if ( ! isset( $_POST['nf_ad_nonce'] ) || ! wp_verify_nonce( $_POST['nf_ad_nonce'], 'nf_ad_save_settings' ) ) return;
+        if ( ! isset( $_POST['nf_ad_nonce'] ) || ! wp_verify_nonce( $_POST['nf_ad_nonce'], 'nf_ad_save_settings' ) ) {
+            return;
+        }
         $settings = get_option( self::OPTION_KEY, [] );
-        $context = isset($_POST['nf_ad_context']) ? $_POST['nf_ad_context'] : '';
+        $context = isset( $_POST['nf_ad_context'] ) ? $_POST['nf_ad_context'] : '';
 
         if ( $context === 'settings' ) {
             $settings['sub_handling']   = sanitize_key( $_POST['sub_handling'] ?? 'keep' );
-            $settings['file_handling'] = sanitize_key( $_POST['file_handling'] ?? 'keep' );
-            $settings['log_limit']      = max(10, absint( $_POST['log_limit'] ));
-            
+            $settings['file_handling']  = sanitize_key( $_POST['file_handling'] ?? 'keep' );
+            $settings['log_limit']      = max( 10, absint( $_POST['log_limit'] ) );
+
             $cron_active = isset( $_POST['cron_active'] ) ? 1 : 0;
             $cron_hour   = absint( $_POST['cron_hour'] );
             $settings['cron_active'] = $cron_active;
@@ -577,7 +639,19 @@ class NF_AD_Dashboard {
         if ( $context === 'rules' ) {
             if ( isset( $_POST['global_days'] ) ) {
                 $settings['global'] = absint( $_POST['global_days'] );
-                if(isset($_POST['forms'])) { foreach($_POST['forms'] as $id => $d) $settings['forms'][absint($id)] = [ 'mode' => sanitize_text_field($d['mode']), 'days' => absint($d['days']) ]; }
+                $settings['global'] = max( 1, (int) $settings['global'] );
+                if ( isset( $_POST['forms'] ) && is_array( $_POST['forms'] ) ) {
+                    foreach ( $_POST['forms'] as $id => $d ) {
+                        $form_id = absint( $id );
+                        if ( ! $form_id || ! is_array( $d ) ) {
+                            continue;
+                        }
+                        $settings['forms'][ $form_id ] = [
+                            'mode' => sanitize_key( $d['mode'] ?? 'global' ),
+                            'days' => absint( $d['days'] ?? 0 ),
+                        ];
+                    }
+                }
             }
         }
 
@@ -611,24 +685,27 @@ class NF_AD_Dashboard {
      */
     public static function ajax_retry_delete() {
         check_ajax_referer( 'nf_ad_security', 'security' );
-        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
-        $id = absint($_POST['id']); if ( ! $id ) wp_send_json_error( 'No ID' );
-        if ( get_post_type($id) !== 'nf_sub' ) wp_send_json_error( 'Invalid Post Type' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+        $id = absint( $_POST['id'] );
+        if ( ! $id ) {
+            wp_send_json_error( 'No ID' );
+        }
+        if ( get_post_type( $id ) !== 'nf_sub' ) {
+            wp_send_json_error( 'Invalid Post Type' );
+        }
 
         // Datei-Bereinigung über den Upload-Deleter ausführen.
-        $files_deleted = NF_AD_Uploads_Deleter::cleanup_files($id);
-        $msg = $files_deleted['deleted'] > 0 ? "Files: {$files_deleted['deleted']} " : "";
+        $files_deleted = NF_AD_Uploads_Deleter::cleanup_files( $id );
+        $deleted_files = (int) ( $files_deleted['deleted'] ?? 0 );
+        $msg = $deleted_files > 0 ? "Files: {$deleted_files} " : '';
 
-        $deleted = false;
-        if(class_exists('Ninja_Forms')) {
-            $nf_form = Ninja_Forms()->form();
-            if(method_exists($nf_form, 'get_sub')) {
-                $sub = $nf_form->get_sub($id);
-                if($sub) { $sub->delete(); $deleted = true; $msg .= '(API)'; }
-            }
+        $deleted = (bool) wp_delete_post( $id, true );
+        if ( $deleted ) {
+            $msg .= '(WP)';
         }
-        if(!$deleted) { if(wp_delete_post($id, true)) { $deleted = true; $msg .= '(WP)'; } }
-        $deleted ? wp_send_json_success('Gelöscht ' . $msg) : wp_send_json_error('Fehler');
+        $deleted ? wp_send_json_success( 'Gelöscht ' . $msg ) : wp_send_json_error( 'Fehler' );
     }
 
     /**
@@ -638,7 +715,9 @@ class NF_AD_Dashboard {
      */
     public static function ajax_force_cleanup() {
         check_ajax_referer( 'nf_ad_security', 'security' );
-        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
         $result = NF_AD_Submissions_Eraser::run_cleanup_manual();
         wp_send_json_success( $result );
     }
@@ -650,7 +729,9 @@ class NF_AD_Dashboard {
      */
     public static function ajax_clear_logs() {
         check_ajax_referer( 'nf_ad_security', 'security' );
-        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Forbidden' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
         NF_AD_Logger::truncate();
         wp_send_json_success();
     }
@@ -662,11 +743,13 @@ class NF_AD_Dashboard {
      */
     public static function ajax_calculate() {
         check_ajax_referer( 'nf_ad_security', 'security' );
-        if(!current_user_can('manage_options')) wp_send_json_error();
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
         // Berechnungstyp: "subs" (Einträge) oder "files" (Uploads).
-        $type = sanitize_key($_POST['type'] ?? 'subs');
+        $type = sanitize_key( $_POST['type'] ?? 'subs' );
         // Simulation durchführen (ohne Löschung).
-        $count = NF_AD_Submissions_Eraser::calculate_dry_run($type);
-        wp_send_json_success( ['count' => $count, 'type' => $type] );
+        $count = NF_AD_Submissions_Eraser::calculate_dry_run( $type );
+        wp_send_json_success( [ 'count' => $count, 'type' => $type ] );
     }
 }

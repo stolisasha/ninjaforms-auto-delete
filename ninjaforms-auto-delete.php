@@ -2,22 +2,29 @@
 /**
  * Plugin Name: Ninja Forms - Auto Delete
  * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen. 
- * Version: 1.2.1
+ * Version: 2.0.0
  * Author: Alex Schlair
  * Author URI: https://www.pronto-media.at
  * Text Domain: nf-auto-delete
  * Requires PHP: 7.4
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
 // =============================================================================
 // KONSTANTEN
 // =============================================================================
 
 /* --- Versionierung & Pfade --- */
-$nf_ad_plugin_data = get_file_data( __FILE__, [ 'Version' => 'Version' ], 'plugin' );
-define( 'NF_AD_VERSION', $nf_ad_plugin_data['Version'] );
+ $nf_ad_plugin_data = get_file_data(
+     __FILE__,
+     [ 'Version' => 'Version' ],
+     'plugin'
+ );
+ $nf_ad_version = isset( $nf_ad_plugin_data['Version'] ) ? trim( (string) $nf_ad_plugin_data['Version'] ) : '1.0.0';
+ define( 'NF_AD_VERSION', $nf_ad_version );
 define( 'NF_AD_DB_VERSION', '1.2' );
 define( 'NF_AD_PATH', plugin_dir_path( __FILE__ ) );
 
@@ -27,9 +34,12 @@ define( 'NF_AD_PATH', plugin_dir_path( __FILE__ ) );
 
 /* --- PHP-Version prüfen --- */
 if ( version_compare( PHP_VERSION, '7.4', '<' ) ) {
-    add_action( 'admin_notices', function() {
-        echo '<div class="error"><p><strong>Auto Delete for Ninja Forms</strong> benötigt PHP 7.4 oder höher.</p></div>';
-    } );
+    add_action(
+        'admin_notices',
+        static function() {
+            echo '<div class="notice notice-error"><p><strong>' . esc_html__( 'Auto Delete for Ninja Forms', 'nf-auto-delete' ) . '</strong> ' . esc_html__( 'benötigt PHP 7.4 oder höher.', 'nf-auto-delete' ) . '</p></div>';
+        }
+    );
     return;
 }
 
@@ -63,6 +73,10 @@ function nf_ad_init() {
         return;
     }
 
+    load_plugin_textdomain( 'nf-auto-delete', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+
+    NF_AD_Logger::maybe_update_db();
+
     // Abhängige Klassen erst nach erfolgreichem Abhängigkeits-Check laden.
     require_once NF_AD_PATH . 'includes/class-nf-ad-uploads-deleter.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-submissions-eraser.php';
@@ -78,9 +92,6 @@ function nf_ad_init() {
         add_action( 'wp_ajax_nf_ad_clear_logs', [ 'NF_AD_Dashboard', 'ajax_clear_logs' ] );
         add_action( 'wp_ajax_nf_ad_force_cleanup', [ 'NF_AD_Dashboard', 'ajax_force_cleanup' ] );
         add_action( 'wp_ajax_nf_ad_calculate', [ 'NF_AD_Dashboard', 'ajax_calculate' ] );
-
-        // DB-Update Check (Safe, da Logger immer geladen ist)
-        add_action( 'admin_init', [ 'NF_AD_Logger', 'maybe_update_db' ] );
     }
 
     /* --- Cron-Event validieren (Self-Healing) --- */
@@ -141,6 +152,5 @@ register_deactivation_hook( __FILE__, 'nf_ad_deactivate' );
  * @return void
  */
 function nf_ad_deactivate() {
-    $timestamp = wp_next_scheduled( 'nf_ad_daily_event' );
-    if ( $timestamp ) wp_unschedule_event( $timestamp, 'nf_ad_daily_event' );
+    wp_clear_scheduled_hook( 'nf_ad_daily_event' );
 }

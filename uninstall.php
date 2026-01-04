@@ -11,7 +11,7 @@
 // SICHERHEITSPRÜFUNG
 // =============================================================================
 
- // Schutz: Direktaufruf des Uninstall-Skripts verhindern.
+// Schutz: Direktaufruf des Uninstall-Skripts verhindern.
 if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
     exit;
 }
@@ -26,19 +26,20 @@ global $wpdb;
 
 // Tabellen nur entfernen, wenn sie existieren.
 $table_logs = $wpdb->prefix . 'nf_ad_logs';
-$wpdb->query( "DROP TABLE IF EXISTS $table_logs" );
+$wpdb->query( "DROP TABLE IF EXISTS `{$table_logs}`" );
 
 $table_runs = $wpdb->prefix . 'nf_ad_cron_runs';
-$wpdb->query( "DROP TABLE IF EXISTS $table_runs" );
+$wpdb->query( "DROP TABLE IF EXISTS `{$table_runs}`" );
 
 /* --- Optionen entfernen --- */
 delete_option( 'nf_ad_settings' );
 delete_option( 'nf_ad_db_version' );
 
+if ( is_multisite() ) {
+    delete_site_option( 'nf_ad_settings' );
+    delete_site_option( 'nf_ad_db_version' );
+}
+
 /* --- Cron-Hook entfernen --- */
 
-// Geplanten Daily-Event entfernen, falls vorhanden.
-$timestamp = wp_next_scheduled( 'nf_ad_daily_event' );
-if ( $timestamp ) {
-    wp_unschedule_event( $timestamp, 'nf_ad_daily_event' );
-}
+wp_clear_scheduled_hook( 'nf_ad_daily_event' );
