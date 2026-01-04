@@ -72,8 +72,23 @@ class NF_AD_Logger {
     public static function finish_run( $run_id, $status, $msg ) {
         global $wpdb;
         if ( ! $run_id ) return;
-        $wpdb->update( $wpdb->prefix . self::TABLE_RUNS, [ 'status' => $status, 'message' => $msg ], [ 'id' => $run_id ] );
-        self::cleanup_runs(50); 
+
+        $table = $wpdb->prefix . self::TABLE_RUNS;
+
+        // Preserve lightweight run-type tag ([CRON] / [MANUAL]) from the original start message.
+        $existing_msg = $wpdb->get_var( $wpdb->prepare( "SELECT message FROM $table WHERE id = %d", $run_id ) );
+        if ( is_string( $existing_msg ) ) {
+            if ( preg_match( '/^(\[(CRON|MANUAL)\])\s+/i', $existing_msg, $m ) ) {
+                $tag = strtoupper( $m[1] );
+                // Only prefix if the new message doesn't already contain a run-type tag.
+                if ( ! preg_match( '/\[(CRON|MANUAL)\]/i', (string) $msg ) ) {
+                    $msg = $tag . ' ' . ltrim( (string) $msg );
+                }
+            }
+        }
+
+        $wpdb->update( $table, [ 'status' => $status, 'message' => $msg ], [ 'id' => $run_id ] );
+        self::cleanup_runs(50);
     }
 
     public static function get_logs( $limit, $page, $orderby = 'time', $order = 'DESC' ) {

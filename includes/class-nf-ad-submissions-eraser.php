@@ -87,7 +87,10 @@ class NF_AD_Submissions_Eraser {
         
         $mode_info = "Subs=$sub_action, Files=$file_action";
         
-        $run_id = NF_AD_Logger::start_run($is_cron ? "Auto-Cron gestartet [$mode_info]..." : "Manuelle Bereinigung gestartet [$mode_info]...");
+        // Prefix run message with a lightweight tag so the dashboard can visually distinguish Cron vs Manual.
+        $type_tag = $is_cron ? '[CRON]' : '[MANUAL]';
+        $msg_text = $is_cron ? 'Auto-Cron gestartet' : 'Manuelle Bereinigung gestartet';
+        $run_id   = NF_AD_Logger::start_run( "$type_tag $msg_text [$mode_info]..." );
         $response = ['deleted' => 0, 'has_more' => false];
 
         if ( $is_cron && empty($settings['cron_active']) ) {

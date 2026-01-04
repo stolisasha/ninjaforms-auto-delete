@@ -406,6 +406,8 @@ class NF_AD_Dashboard {
                             <?php
                             $msg = esc_html( $run['message'] );
                             $replacements = [
+                                '[CRON]'   => '<strong style="color:#2563eb">[CRON]</strong>',
+                                '[MANUAL]' => '<strong style="color:#86198f">[MANUAL]</strong>',
                                 '[TRASH]'   => '<strong style="color:#d97706">[TRASH]</strong>',
                                 '[DELETE]'  => '<strong style="color:#dc2626">[DELETE]</strong>',
                                 '[FILES]'   => '<strong style="color:#2563eb">[FILES]</strong>',
@@ -458,6 +460,8 @@ class NF_AD_Dashboard {
                             $msg = esc_html( $log['message'] );
                             // Highlighting for known action/status tags (safe because we escape first)
                             $replacements = [
+                                '[CRON]'   => '<strong style="color:#2563eb">[CRON]</strong>',
+                                '[MANUAL]' => '<strong style="color:#86198f">[MANUAL]</strong>',
                                 '[TRASH]'   => '<strong style="color:#d97706">[TRASH]</strong>',
                                 '[DELETE]'  => '<strong style="color:#dc2626">[DELETE]</strong>',
                                 '[FILES]'   => '<strong style="color:#2563eb">[FILES]</strong>',
