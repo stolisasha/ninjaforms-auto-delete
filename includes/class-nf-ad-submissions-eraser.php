@@ -46,9 +46,11 @@ class NF_AD_Submissions_Eraser {
      * @return string
      */
     private static function get_cutoff_datetime( $days ) {
-        $days      = max( 1, absint( $days ) );
-        $threshold = current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS );
-        return wp_date( 'Y-m-d H:i:s', $threshold );
+        $days = max( 1, absint( $days ) );
+
+        // Use WordPress site timezone without double-applying offsets.
+        $date = current_datetime()->modify( '-' . $days . ' days' );
+        return $date->format( 'Y-m-d H:i:s' );
     }
 
     // =============================================================================
@@ -92,6 +94,11 @@ class NF_AD_Submissions_Eraser {
      */
     public static function calculate_dry_run( $type = 'subs' ) {
         $settings = NF_AD_Dashboard::get_settings();
+
+        // Defensive: If Ninja Forms is not loaded, return 0.
+        if ( ! function_exists( 'Ninja_Forms' ) ) {
+            return 0;
+        }
 
         // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
         $sub_action = $settings['sub_handling'] ?? 'keep';
@@ -144,9 +151,12 @@ class NF_AD_Submissions_Eraser {
                 // Upload-Field-Keys einmalig pro Formular ermitteln und cachen.
                 if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
                     self::$upload_keys_cache[ $fid ] = [];
-                    foreach ( Ninja_Forms()->form( $fid )->get_fields() as $f ) {
-                        if ( $f->get_setting( 'type' ) === 'file_upload' ) {
-                            self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
+                    $fields = Ninja_Forms()->form( $fid )->get_fields();
+                    if ( is_iterable( $fields ) ) {
+                        foreach ( $fields as $f ) {
+                            if ( is_object( $f ) && method_exists( $f, 'get_setting' ) && $f->get_setting( 'type' ) === 'file_upload' ) {
+                                self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
+                            }
                         }
                     }
                 }
@@ -301,9 +311,12 @@ class NF_AD_Submissions_Eraser {
             // Sonderfall: Submissions bleiben, aber Uploads sollen gelöscht werden. Dafür nur Submissions mit Upload-Meta selektieren.
             if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
                 self::$upload_keys_cache[ $fid ] = [];
-                foreach ( Ninja_Forms()->form( $fid )->get_fields() as $f ) {
-                    if ( $f->get_setting( 'type' ) === 'file_upload' ) {
-                        self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
+                $fields = Ninja_Forms()->form( $fid )->get_fields();
+                if ( is_iterable( $fields ) ) {
+                    foreach ( $fields as $f ) {
+                        if ( is_object( $f ) && method_exists( $f, 'get_setting' ) && $f->get_setting( 'type' ) === 'file_upload' ) {
+                            self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
+                        }
                     }
                 }
             }

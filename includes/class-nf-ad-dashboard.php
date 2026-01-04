@@ -295,12 +295,21 @@ class NF_AD_Dashboard {
                             var btn = $(this); var type = btn.data('type'); var label = btn.text();
                             btn.prop('disabled', true).text('Rechne...');
                             $('#calc-output').text('Analysiere Datenbank ...');
-                            $.post(ajaxurl, {action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: type}, function(res) {
+                            $.post(
+                                ajaxurl,
+                                { action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: type },
+                                function(res) {
+                                    btn.prop('disabled', false).text(label);
+                                    if (res && res.success) {
+                                        var txt = (res.data.type === 'subs') ? 'Einträge' : 'Uploads';
+                                        $('#calc-output').text('Simulation Ergebnis: ' + res.data.count + ' ' + txt + ' ' + 'sind älter als die Frist.');
+                                    } else {
+                                        $('#calc-output').text('Fehler bei der Berechnung.');
+                                    }
+                                }
+                            ).fail(function() {
                                 btn.prop('disabled', false).text(label);
-                                if(res.success) { 
-                                    var txt = (res.data.type === 'subs') ? 'Einträge' : 'Uploads';
-                                    $('#calc-output').text('Simulation Ergebnis: ' + res.data.count + ' ' + txt + ' sind älter als die Frist.'); 
-                                } else { $('#calc-output').text('Fehler bei der Berechnung.'); }
+                                $('#calc-output').text('Fehler (Server).');
                             });
                         });
                     });
@@ -748,8 +757,13 @@ class NF_AD_Dashboard {
         }
         // Berechnungstyp: "subs" (Einträge) oder "files" (Uploads).
         $type = sanitize_key( $_POST['type'] ?? 'subs' );
-        // Simulation durchführen (ohne Löschung).
-        $count = NF_AD_Submissions_Eraser::calculate_dry_run( $type );
-        wp_send_json_success( [ 'count' => $count, 'type' => $type ] );
+
+        try {
+            // Simulation durchführen (ohne Löschung).
+            $count = NF_AD_Submissions_Eraser::calculate_dry_run( $type );
+            wp_send_json_success( [ 'count' => $count, 'type' => $type ] );
+        } catch ( Throwable $e ) {
+            wp_send_json_error( 'Calculation failed.' );
+        }
     }
 }
