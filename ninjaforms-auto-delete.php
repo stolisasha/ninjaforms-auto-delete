@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Ninja Forms - Auto Delete
- * Description: GDPR compliance tool to automatically delete submissions and files after a set period.
+ * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen. 
  * Version: 1.0.0
  * Author: Alex Schlair
  * Author URI: https://www.pronto-media.at
