@@ -102,6 +102,20 @@ class NF_AD_Dashboard {
             .nf-ad-modal { background: #fff; width: 500px; max-width: 90%; padding: 30px; border-radius: 4px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
             .nf-ad-progress-list { max-height: 300px; overflow-y: auto; margin: 20px 0; border: 1px solid #ddd; background: #f9f9f9; padding: 10px; list-style: none; }
             .nf-ad-progress-list li { padding: 5px; border-bottom: 1px solid #eee; font-size: 13px; display: flex; align-items: center; }
+
+            /* --- Modal Spinner Animation --- */
+            #batch-log .loading .dashicons {
+                font-size: 18px;
+                width: 18px;
+                height: 18px;
+                vertical-align: text-bottom;
+                animation: nf-ad-spin 1.5s infinite linear;
+            }
+
+            @keyframes nf-ad-spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
             
             /* --- Einstellungen & Logs --- */
             .nf-ad-radio-group label { display: inline-flex; align-items: center; gap: 6px; margin-right: 30px; margin-bottom: 8px; font-weight: 400; }
