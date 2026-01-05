@@ -761,6 +761,10 @@ class NF_AD_Dashboard {
     /**
      * AJAX: Berechnet eine Simulation (Dry Run) für Einträge oder Uploads.
      *
+     * Ruft je nach Typ die zuständige Klasse auf:
+     * - "subs": NF_AD_Submissions_Eraser::calculate_dry_run()
+     * - "files": NF_AD_Uploads_Deleter::calculate_dry_run()
+     *
      * @return void
      */
     public static function ajax_calculate() {
@@ -768,14 +772,24 @@ class NF_AD_Dashboard {
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_send_json_error( 'Forbidden' );
         }
+
         // Berechnungstyp: "subs" (Einträge) oder "files" (Uploads).
         $type = sanitize_key( $_POST['type'] ?? 'subs' );
 
         try {
-            // Simulation durchführen (ohne Löschung).
-            $count = NF_AD_Submissions_Eraser::calculate_dry_run( $type );
-            wp_send_json_success( [ 'count' => $count, 'type' => $type ] );
+            // Delegation an die zuständige Klasse (saubere Architektur).
+            if ( 'files' === $type ) {
+                $count = class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'calculate_dry_run' )
+                    ? NF_AD_Uploads_Deleter::calculate_dry_run()
+                    : 0;
+            } else {
+                $count = NF_AD_Submissions_Eraser::calculate_dry_run();
+            }
+
+            wp_send_json_success( array( 'count' => $count, 'type' => $type ) );
         } catch ( Throwable $e ) {
+            // Log error for debugging (WordPress error_log).
+            error_log( 'NF Auto Delete - Dry run failed: ' . $e->getMessage() );
             wp_send_json_error( 'Calculation failed.' );
         }
     }

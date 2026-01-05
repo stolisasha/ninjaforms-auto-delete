@@ -86,13 +86,13 @@ class NF_AD_Submissions_Eraser {
     /* --- Berechnung ohne Löschung --- */
 
     /**
-     * Berechnet die Anzahl der betroffenen Submissions oder Upload-Dateien, ohne Änderungen vorzunehmen.
+     * Berechnet die Anzahl der betroffenen Submissions, ohne Änderungen vorzunehmen.
      *
-     * @param string $type "subs" für Submissions, "files" für Uploads.
+     * WICHTIG: Diese Methode zählt NUR Submissions. Für Upload-Dateien siehe NF_AD_Uploads_Deleter::calculate_dry_run().
      *
      * @return int
      */
-    public static function calculate_dry_run( $type = 'subs' ) {
+    public static function calculate_dry_run() {
         $settings = NF_AD_Dashboard::get_settings();
 
         // Defensive: If Ninja Forms is not loaded, return 0.
@@ -103,30 +103,27 @@ class NF_AD_Submissions_Eraser {
         // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
         $sub_action = $settings['sub_handling'] ?? 'keep';
 
-        global $wpdb;
-
-        // Optional: official Ninja Forms File Uploads add-on table.
-        $uploads_table = $wpdb->prefix . 'ninja_forms_uploads';
-        $has_uploads_table = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $uploads_table ) ) === $uploads_table );
-
-        $global     = (int) ( $settings['global'] ?? 365 );
-        $forms      = Ninja_Forms()->form()->get_forms();
+        $global = (int) ( $settings['global'] ?? 365 );
+        $forms  = Ninja_Forms()->form()->get_forms();
         $total_count = 0;
-        $start = time();
 
         foreach ( $forms as $form ) {
-            $rule = $settings['forms'][ $form->get_id() ] ?? [ 'mode' => 'global' ];
-            if ( $rule['mode'] === 'never' ) {
+            $fid  = $form->get_id();
+            $rule = $settings['forms'][ $fid ] ?? array( 'mode' => 'global' );
+
+            if ( isset( $rule['mode'] ) && 'never' === $rule['mode'] ) {
                 continue;
             }
-            $days = ( $rule['mode'] === 'custom' ) ? (int) $rule['days'] : $global;
+
+            $days = ( isset( $rule['mode'] ) && 'custom' === $rule['mode'] ) ? (int) $rule['days'] : $global;
             if ( $days < 1 ) {
                 $days = 365;
             }
-            $fid   = $form->get_id();
+
             $cutoff = self::get_cutoff_datetime( $days );
 
-            $args = [
+            // Query-Parameter für Submissions.
+            $args = array(
                 'post_type'              => 'nf_sub',
                 'posts_per_page'         => 1,
                 'fields'                 => 'ids',
@@ -135,158 +132,31 @@ class NF_AD_Submissions_Eraser {
                 'update_post_term_cache' => false,
                 'ignore_sticky_posts'    => true,
                 'suppress_filters'       => false,
-                'date_query'             => [
-                    [
+                'date_query'             => array(
+                    array(
                         'column'    => 'post_date',
                         'before'    => $cutoff,
                         'inclusive' => true,
-                    ],
-                ],
-                'meta_query'             => [
-                    [
+                    ),
+                ),
+                'meta_query'             => array(
+                    array(
                         'key'     => '_form_id',
                         'value'   => $fid,
                         'compare' => '=',
-                    ],
-                ],
-                'post_status'            => ( $sub_action === 'delete' )
+                    ),
+                ),
+                'post_status'            => ( 'delete' === $sub_action )
                     ? array_keys( get_post_stati() )
                     : array_values( array_diff( array_keys( get_post_stati() ), array( 'trash' ) ) ),
-            ];
+            );
 
-            if ( $type === 'files' ) {
-                // Prefer the official File Uploads add-on table when available.
-                // This matches the File Uploads admin UI and avoids relying on submission meta formats.
-                if ( $has_uploads_table ) {
-                    // Try common datetime columns used by the add-on.
-                    $cutoff_sql = $cutoff;
-
-                    // Some installs store form_id in a dedicated column.
-                    $count = 0;
-
-                    // Detect available columns once per request.
-                    static $uploads_columns = null;
-                    if ( null === $uploads_columns ) {
-                        $uploads_columns = $wpdb->get_col( "DESCRIBE {$uploads_table}", 0 );
-                    }
-
-                    $date_col = null;
-                    foreach ( array( 'created_at', 'date_created', 'created', 'created_on', 'date' ) as $c ) {
-                        if ( in_array( $c, $uploads_columns, true ) ) {
-                            $date_col = $c;
-                            break;
-                        }
-                    }
-
-                    $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
-
-                    if ( $date_col && $form_col ) {
-                        // Each row represents a single upload. Counting rows is equivalent to counting uploads.
-                        $sql   = "SELECT COUNT(1) FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < %s";
-                        $count = (int) $wpdb->get_var( $wpdb->prepare( $sql, $fid, $cutoff_sql ) );
-                    } elseif ( $date_col ) {
-                        // Fallback: count by date only if no form_id column exists.
-                        $sql   = "SELECT COUNT(1) FROM {$uploads_table} WHERE {$date_col} < %s";
-                        $count = (int) $wpdb->get_var( $wpdb->prepare( $sql, $cutoff_sql ) );
-                    }
-
-                    $total_count += $count;
-                    continue;
-                }
-                // Upload-Field-Keys einmalig pro Formular ermitteln und cachen.
-                if ( ! isset( self::$upload_keys_cache[ $fid ] ) ) {
-                    self::$upload_keys_cache[ $fid ] = [];
-                    $nf_form = Ninja_Forms()->form( $fid );
-                    $fields  = $nf_form ? $nf_form->get_fields() : [];
-                    if ( is_iterable( $fields ) ) {
-                        foreach ( $fields as $f ) {
-                            if ( is_object( $f ) && method_exists( $f, 'get_setting' ) && $f->get_setting( 'type' ) === 'file_upload' ) {
-                                self::$upload_keys_cache[ $fid ][] = '_field_' . $f->get_id();
-                            }
-                        }
-                    }
-                }
-
-                $upload_keys = self::$upload_keys_cache[ $fid ];
-                if ( empty( $upload_keys ) ) {
-                    continue;
-                }
-
-                // Query only submissions that actually have any upload meta not empty.
-                $meta_or = [ 'relation' => 'OR' ];
-                foreach ( $upload_keys as $k ) {
-                    $meta_or[] = [ 'key' => $k, 'value' => '', 'compare' => '!=' ];
-                }
-
-                $paged = 1;
-                do {
-                    if ( ( time() - $start ) >= self::TIME_LIMIT ) {
-                        // Avoid hanging the AJAX request.
-                        break 2;
-                    }
-
-                    $paged_args                   = $args;
-                    $paged_args['posts_per_page'] = 200;
-                    $paged_args['paged']          = $paged;
-                    $paged_args['no_found_rows']  = true;
-                    $paged_args['meta_query'][]   = $meta_or;
-
-                    $q   = new WP_Query( $paged_args );
-                    $ids = $q->posts;
-                    wp_reset_postdata();
-
-                    if ( empty( $ids ) ) {
-                        break;
-                    }
-
-                    foreach ( $ids as $sid ) {
-                        if ( ( time() - $start ) >= self::TIME_LIMIT ) {
-                            break 3;
-                        }
-
-                        foreach ( $upload_keys as $meta_key ) {
-                            $raw = get_post_meta( $sid, $meta_key, true );
-                            if ( '' === $raw || null === $raw ) {
-                                continue;
-                            }
-
-                            $val = maybe_unserialize( $raw );
-
-                            // JSON-Strings erkennen und decodieren.
-                            if ( is_string( $val ) ) {
-                                $trim = trim( $val );
-                                if ( '' !== $trim && ( 0 === strpos( $trim, '[' ) || 0 === strpos( $trim, '{' ) ) ) {
-                                    $json = json_decode( $trim, true );
-                                    if ( JSON_ERROR_NONE === json_last_error() ) {
-                                        $val = $json;
-                                    }
-                                }
-                            }
-
-                            if ( empty( $val ) ) {
-                                continue;
-                            }
-
-                            // Count real files.
-                            if ( is_array( $val ) ) {
-                                $total_count += count( $val );
-                            } else {
-                                // string url/path OR numeric attachment ID counts as one.
-                                $total_count++;
-                            }
-                        }
-                    }
-
-                    $paged++;
-                } while ( true );
-
-                continue;
-            }
-
+            // Zähle Submissions für dieses Formular.
             $q = new WP_Query( $args );
             $total_count += (int) $q->found_posts;
             wp_reset_postdata();
         }
+
         return $total_count;
     }
 
@@ -395,6 +265,31 @@ class NF_AD_Submissions_Eraser {
     private static function process_form( $fid, $days, $sub_action, $file_action ) {
         // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
         $cutoff = self::get_cutoff_datetime( $days );
+
+        // If the official File Uploads add-on table is present (no submission_id in some setups),
+        // delete uploads by form + cutoff in batches until finished or time limit reached.
+        $table_files_deleted = 0;
+        $table_file_errors   = 0;
+        if ( 'delete' === $file_action && class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'cleanup_uploads_for_form' ) ) {
+            $table_start = time();
+            do {
+                $table_res = NF_AD_Uploads_Deleter::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT );
+                $table_files_deleted += (int) ( $table_res['deleted'] ?? 0 );
+                $table_file_errors   += (int) ( $table_res['errors'] ?? 0 );
+
+                $rows = (int) ( $table_res['rows'] ?? 0 );
+
+                // Stop if we didn't get a full batch (no more rows), or if we're close to the request time limit.
+                if ( $rows < self::BATCH_LIMIT ) {
+                    break;
+                }
+
+                if ( ( time() - $table_start ) >= max( 1, ( self::TIME_LIMIT - 3 ) ) ) {
+                    break;
+                }
+            } while ( true );
+        }
+
         $query_args = [
             'post_type'              => 'nf_sub',
             'posts_per_page'         => self::BATCH_LIMIT,
@@ -471,8 +366,11 @@ class NF_AD_Submissions_Eraser {
             $files_deleted = 0;
             $file_errors   = 0;
 
+            // Table-based upload deletions are performed per form (not per submission) and must not be
+            // attributed to each submission, otherwise counts will be duplicated in logs.
+
             // 1) Datei-Bereinigung (optional, abhängig von file_action).
-            if ( $file_action === 'delete' && class_exists( 'NF_AD_Uploads_Deleter' ) ) {
+            if ( $file_action === 'delete' && class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'cleanup_files' ) ) {
                 $f_res        = NF_AD_Uploads_Deleter::cleanup_files( $id );
                 $files_deleted = (int) ( $f_res['deleted'] ?? 0 );
                 $file_errors   = (int) ( $f_res['errors'] ?? 0 );
@@ -575,6 +473,16 @@ class NF_AD_Submissions_Eraser {
 
             NF_AD_Logger::log( $fid, $id, $sub_date, $stat, $msg );
             $result['count']++;
+        }
+        // Nach der Tabelle-basierten Bereinigung (pro Formular), einmaliges Logging falls etwas gelöscht/fehlerhaft war.
+        if ( ( $table_files_deleted > 0 || $table_file_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
+            $table_stat = ( $table_file_errors > 0 ) ? 'warning' : 'success';
+            $table_msg  = '[FILES][TABLE] ' . $table_files_deleted . ' Datei(en) gelöscht (Form Uploads Tabelle).';
+            if ( $table_file_errors > 0 ) {
+                $table_msg .= ' [WARNING] ' . $table_file_errors . ' Datei-Fehler.';
+            }
+            // Submission ID 0 indicates a form-level operation.
+            NF_AD_Logger::log( (int) $fid, 0, '', $table_stat, $table_msg );
         }
         return $result;
     }
