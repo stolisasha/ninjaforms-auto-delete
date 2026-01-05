@@ -306,7 +306,12 @@ class NF_AD_Dashboard {
                                 .done(function(res) {
                                     if (res && res.success && res.data && typeof res.data.count !== 'undefined') {
                                         var txt = (res.data.type === 'subs') ? 'Einträge' : 'Uploads';
-                                        $('#calc-output').text('Simulation Ergebnis: ' + res.data.count + ' ' + txt + ' sind älter als die Frist.');
+                                        // BUGFIX: Zeige "5000+" wenn Performance-Limit erreicht wurde.
+                                        var count_display = res.data.count;
+                                        if (res.data.limit_reached) {
+                                            count_display = count_display + '+';
+                                        }
+                                        $('#calc-output').text('Simulation Ergebnis: ' + count_display + ' ' + txt + ' sind älter als die Frist.');
                                     } else if (res && res.data) {
                                         // WP/AJAX returned a structured error.
                                         $('#calc-output').text('Fehler: ' + res.data);
@@ -765,6 +770,10 @@ class NF_AD_Dashboard {
      * - "subs": NF_AD_Submissions_Eraser::calculate_dry_run()
      * - "files": NF_AD_Uploads_Deleter::calculate_dry_run()
      *
+     * Return-Format (seit v2.1): array{count:int, limit_reached:bool}
+     * - count: Anzahl der gefundenen Einträge/Uploads
+     * - limit_reached: true, wenn Performance-Limit (5.000) erreicht wurde
+     *
      * @return void
      */
     public static function ajax_calculate() {
@@ -779,14 +788,26 @@ class NF_AD_Dashboard {
         try {
             // Delegation an die zuständige Klasse (saubere Architektur).
             if ( 'files' === $type ) {
-                $count = class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'calculate_dry_run' )
+                $result = class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'calculate_dry_run' )
                     ? NF_AD_Uploads_Deleter::calculate_dry_run()
-                    : 0;
+                    : [ 'count' => 0, 'limit_reached' => false ];
             } else {
-                $count = NF_AD_Submissions_Eraser::calculate_dry_run();
+                $result = NF_AD_Submissions_Eraser::calculate_dry_run();
             }
 
-            wp_send_json_success( array( 'count' => $count, 'type' => $type ) );
+            // DEFENSIVE: Fallback für Legacy-Return (falls Methode noch int zurückgibt).
+            if ( is_int( $result ) ) {
+                $result = [ 'count' => $result, 'limit_reached' => false ];
+            }
+
+            $count = (int) ( $result['count'] ?? 0 );
+            $limit_reached = (bool) ( $result['limit_reached'] ?? false );
+
+            wp_send_json_success( [
+                'count'         => $count,
+                'limit_reached' => $limit_reached,
+                'type'          => $type,
+            ] );
         } catch ( Throwable $e ) {
             // Log error for debugging (WordPress error_log).
             error_log( 'NF Auto Delete - Dry run failed: ' . $e->getMessage() );

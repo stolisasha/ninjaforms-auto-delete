@@ -119,6 +119,31 @@ class NF_AD_Uploads_Deleter {
         return null;
     }
 
+    /**
+     * Debug-Logging für Entwicklung und Troubleshooting.
+     * Schreibt nur wenn WP_DEBUG aktiv ist, um Performance-Overhead zu vermeiden.
+     *
+     * @param string $message Nachricht.
+     * @param array  $context Optionaler Kontext (wird als JSON serialisiert).
+     *
+     * @return void
+     */
+    private static function debug_log( $message, $context = [] ) {
+        // Nur loggen wenn WordPress Debug-Modus aktiv ist.
+        if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
+            return;
+        }
+
+        $log_msg = '[NF Auto Delete - Uploads] ' . $message;
+
+        // Kontext als JSON anhängen (wenn vorhanden).
+        if ( ! empty( $context ) ) {
+            $log_msg .= ' | Context: ' . wp_json_encode( $context, JSON_UNESCAPED_UNICODE );
+        }
+
+        error_log( $log_msg );
+    }
+
     // =============================================================================
     // DRY RUN (SIMULATION)
     // =============================================================================
@@ -131,29 +156,46 @@ class NF_AD_Uploads_Deleter {
      * Diese Methode nutzt EXAKT dieselbe Logik wie die tatsächliche Löschung, um Konsistenz zu gewährleisten.
      * Optimiert durch intelligente file_exists() Checks (inspiriert vom NF File Uploads Add-on).
      *
-     * @return int
+     * WICHTIG: Limit von 5.000 Uploads pro Form. Bei Limit-Erreichen wird Flag gesetzt.
+     *
+     * @return array{count:int,limit_reached:bool} Count und Flag ob Limit erreicht wurde.
      */
     public static function calculate_dry_run() {
         $settings = class_exists( 'NF_AD_Dashboard' ) ? NF_AD_Dashboard::get_settings() : array();
 
         // Defensive: Wenn Ninja Forms nicht geladen ist, 0 zurückgeben.
         if ( ! function_exists( 'Ninja_Forms' ) ) {
-            return 0;
+            return [ 'count' => 0, 'limit_reached' => false ];
         }
 
         $file_action = $settings['file_handling'] ?? 'keep';
 
         // Wenn Files behalten werden sollen, nichts zu zählen.
         if ( 'keep' === $file_action ) {
-            return 0;
+            return [ 'count' => 0, 'limit_reached' => false ];
         }
 
         $global = (int) ( $settings['global'] ?? 365 );
         $forms  = Ninja_Forms()->form()->get_forms();
+
+        // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt (Edge-Case: DB-Fehler, Partial Plugin Load).
+        if ( ! is_array( $forms ) || empty( $forms ) ) {
+            return [ 'count' => 0, 'limit_reached' => false ];
+        }
+
         $total_count = 0;
+        $any_limit_reached = false;
 
         foreach ( $forms as $form ) {
-            $fid  = $form->get_id();
+            // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
+            if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
+                continue;
+            }
+
+            $fid = $form->get_id();
+            if ( ! $fid || $fid < 1 ) {
+                continue; // Ungültige Form-ID überspringen
+            }
             $rule = $settings['forms'][ $fid ] ?? array( 'mode' => 'global' );
 
             if ( isset( $rule['mode'] ) && 'never' === $rule['mode'] ) {
@@ -171,16 +213,26 @@ class NF_AD_Uploads_Deleter {
 
             // NEUE ARCHITEKTUR: Nur noch Tabellen-basierte Zählung.
             // Meta-basierte Legacy-Uploads werden ignoriert (klare Trennung: nur Ninja Forms Uploads Add-on Tabelle).
-            $table_count = self::count_from_uploads_table( $fid, $cutoff );
-            $total_count += $table_count;
+            $result = self::count_from_uploads_table( $fid, $cutoff );
+            $total_count += $result['count'];
+
+            if ( $result['limit_reached'] ) {
+                $any_limit_reached = true;
+            }
         }
 
-        return $total_count;
+        return [
+            'count' => $total_count,
+            'limit_reached' => $any_limit_reached,
+        ];
     }
 
     /**
      * Zählt Uploads aus der offiziellen Ninja Forms File Uploads Tabelle.
      * Nutzt dieselbe Logik wie cleanup_uploads_for_form(), aber ohne zu löschen.
+     *
+     * BUGFIX: Implementiert Pagination um Uploads korrekt zu zählen.
+     * Maximum: 5.000 Zeilen (Performance-Schutz), darüber hinaus Abbruch mit Hinweis.
      *
      * WICHTIG: Zählt NUR Uploads die NICHT per-submission gelöscht werden (kein submission_id in Tabelle).
      * Uploads MIT submission_id werden von count_from_submission_meta() gezählt.
@@ -188,7 +240,7 @@ class NF_AD_Uploads_Deleter {
      * @param int    $fid    Formular-ID.
      * @param string $cutoff Cutoff-Datum im Format 'Y-m-d H:i:s'.
      *
-     * @return int
+     * @return array{count:int,limit_reached:bool} Count und Flag ob Limit erreicht wurde.
      */
     private static function count_from_uploads_table( $fid, $cutoff ) {
         global $wpdb;
@@ -199,7 +251,8 @@ class NF_AD_Uploads_Deleter {
         // Prüfe ob Tabelle existiert.
         $has_uploads_table = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $uploads_table_like ) ) === $uploads_table );
         if ( ! $has_uploads_table ) {
-            return 0;
+            // BUGFIX: Richtige Return-Struktur (array statt int).
+            return [ 'count' => 0, 'limit_reached' => false ];
         }
 
         // Schema-Detection.
@@ -210,13 +263,15 @@ class NF_AD_Uploads_Deleter {
         $data_col = in_array( 'data', $uploads_columns, true ) ? 'data' : null;
         $date_col = self::detect_uploads_date_column( $uploads_columns );
         $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
+        $id_col   = in_array( 'id', $uploads_columns, true ) ? 'id' : null;
 
         // NEUE ARCHITEKTUR: Wir löschen ALLE Uploads basierend auf form_id + cutoff_date.
         // Die submission_id ist für die Alters-Prüfung irrelevant!
         // Uploads werden unabhängig von Submissions gelöscht (klare Trennung der Verantwortlichkeiten).
 
-        if ( ! $data_col || ! $date_col || ! $form_col ) {
-            return 0;
+        if ( ! $data_col || ! $date_col || ! $form_col || ! $id_col ) {
+            // BUGFIX: Richtige Return-Struktur (array statt int).
+            return [ 'count' => 0, 'limit_reached' => false ];
         }
 
         // Datums-Typ erkennen.
@@ -238,39 +293,87 @@ class NF_AD_Uploads_Deleter {
             }
         }
 
-        // Query mit Limit (Crash-Sicherheit: max 5000 Zeilen).
-        $sql = "SELECT {$data_col} FROM {$uploads_table}
-                WHERE {$form_col} = %d
-                AND {$date_col} < {$date_placeholder}
-                {$deleted_sql}
-                LIMIT 5000";
-
-        $params = array_merge( array( $fid, $cutoff_value ), $deleted_params );
-        $rows = $wpdb->get_col( $wpdb->prepare( $sql, ...$params ) );
-
-        if ( empty( $rows ) ) {
-            return 0;
-        }
-
+        // BUGFIX #3: Pagination implementieren (wie bei cleanup_uploads_for_form).
+        // Batch-Size: 500, Maximum: 5.000 Zeilen (Performance-Schutz).
+        // WICHTIG: Bei Limit-Erreichen wird flag gesetzt für UI-Kommunikation ("5.000+").
         $count = 0;
+        $last_id = 0;
+        $batch_size = 500;
+        $max_rows = 5000;
+        $processed = 0;
+        $limit_reached = false;
 
-        // Iteriere durch Upload-Daten (nicht Submissions!).
-        foreach ( $rows as $serialized_data ) {
-            $upload_data = maybe_unserialize( $serialized_data );
+        do {
+            // Query mit Pagination (id > last_id).
+            $sql = "SELECT {$id_col}, {$data_col} FROM {$uploads_table}
+                    WHERE {$form_col} = %d
+                    AND {$date_col} < {$date_placeholder}
+                    {$deleted_sql}
+                    AND {$id_col} > %d
+                    ORDER BY {$id_col} ASC
+                    LIMIT %d";
 
-            if ( ! is_array( $upload_data ) ) {
-                continue;
+            $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $last_id, $batch_size ) );
+            $rows = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A );
+
+            if ( empty( $rows ) ) {
+                break; // Keine weiteren Zeilen
             }
 
-            // INTELLIGENTER Check (inspiriert von NF File Uploads Add-on).
-            if ( ! self::smart_file_exists( $upload_data ) ) {
-                continue;
+            // Iteriere durch Upload-Daten.
+            foreach ( $rows as $row ) {
+                $row_id = isset( $row[ $id_col ] ) ? absint( $row[ $id_col ] ) : 0;
+                if ( $row_id > $last_id ) {
+                    $last_id = $row_id; // Pagination fortsetzen
+                }
+
+                $serialized_data = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
+                $upload_data = maybe_unserialize( $serialized_data );
+
+                if ( ! is_array( $upload_data ) ) {
+                    continue;
+                }
+
+                // INTELLIGENTER Check (inspiriert von NF File Uploads Add-on).
+                if ( ! self::smart_file_exists( $upload_data ) ) {
+                    continue;
+                }
+
+                $count++;
             }
 
-            $count++;
-        }
+            $processed += count( $rows );
 
-        return $count;
+            // Performance-Schutz: Bei > 5.000 Zeilen abbrechen und Flag setzen.
+            if ( $processed >= $max_rows ) {
+                $limit_reached = true;
+                self::debug_log( 'Dry-run: Performance limit reached', [
+                    'form_id' => $fid,
+                    'processed_rows' => $processed,
+                    'max_rows' => $max_rows,
+                    'counted_files' => $count,
+                ] );
+                break;
+            }
+
+            // Wenn weniger als batch_size zurückkam, sind wir am Ende.
+            if ( count( $rows ) < $batch_size ) {
+                break;
+            }
+
+        } while ( true );
+
+        self::debug_log( 'Dry-run completed for form', [
+            'form_id' => $fid,
+            'counted_files' => $count,
+            'processed_rows' => $processed,
+            'limit_reached' => $limit_reached,
+        ] );
+
+        return [
+            'count' => $count,
+            'limit_reached' => $limit_reached,
+        ];
     }
 
     /**
@@ -640,17 +743,22 @@ class NF_AD_Uploads_Deleter {
      * Die submission_id ist irrelevant - Uploads werden unabhängig von Submissions gelöscht.
      * Dies ermöglicht klare Trennung: Uploads Deleter = Files, Submissions Eraser = Submissions.
      *
+     * BUGFIX: Unterstützt Pagination via $min_id um Endlosschleifen zu vermeiden,
+     * wenn Dateien übersprungen werden (externe Storage).
+     *
      * @param int    $fid    Formular-ID.
      * @param string $cutoff Cutoff-Datum im Format 'Y-m-d H:i:s' (WordPress-Zeitzone).
      * @param int    $limit  Maximale Anzahl Zeilen pro Batch.
+     * @param int    $min_id Minimale ID für Pagination (Standard: 0).
      *
-     * @return array{deleted:int,errors:int,rows:int}
+     * @return array{deleted:int,errors:int,rows:int,last_id:int}
      */
-    public static function cleanup_uploads_for_form( $fid, $cutoff, $limit = 50 ) {
-        $stats = [ 'deleted' => 0, 'errors' => 0, 'rows' => 0 ];
+    public static function cleanup_uploads_for_form( $fid, $cutoff, $limit = 50, $min_id = 0 ) {
+        $stats = [ 'deleted' => 0, 'errors' => 0, 'rows' => 0, 'last_id' => 0 ];
 
-        $fid   = absint( $fid );
-        $limit = max( 1, absint( $limit ) );
+        $fid    = absint( $fid );
+        $limit  = max( 1, absint( $limit ) );
+        $min_id = max( 0, absint( $min_id ) );
 
         if ( ! $fid || ! is_string( $cutoff ) || '' === $cutoff ) {
             $stats['errors']++;
@@ -673,8 +781,10 @@ class NF_AD_Uploads_Deleter {
         $data_col = in_array( 'data', $uploads_columns, true ) ? 'data' : null;
         $date_col = self::detect_uploads_date_column( $uploads_columns );
         $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
+        $id_col   = in_array( 'id', $uploads_columns, true ) ? 'id' : null;
 
-        if ( ! $data_col || ! $date_col || ! $form_col ) {
+        // BUGFIX: Ohne ID-Spalte ist keine Pagination möglich.
+        if ( ! $data_col || ! $date_col || ! $form_col || ! $id_col ) {
             $stats['errors']++;
             return $stats;
         }
@@ -698,8 +808,10 @@ class NF_AD_Uploads_Deleter {
         }
 
         // Lade Kandidaten-Zeilen (id + data) für dieses Formular, die älter als Cutoff sind.
-        $sql  = "SELECT id, {$data_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} ORDER BY id ASC LIMIT %d";
-        $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $limit ) );
+        // BUGFIX: Pagination via min_id um Endlosschleifen bei übersprungenen Dateien zu vermeiden.
+        // BUGFIX: Verwende $id_col statt hardcoded "id" für Kompatibilität.
+        $sql  = "SELECT {$id_col}, {$data_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} AND {$id_col} > %d ORDER BY {$id_col} ASC LIMIT %d";
+        $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $min_id, $limit ) );
         $rows = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A );
 
         if ( empty( $rows ) ) {
@@ -709,8 +821,14 @@ class NF_AD_Uploads_Deleter {
         $stats['rows'] = count( $rows );
 
         foreach ( $rows as $row ) {
-            $row_id = isset( $row['id'] ) ? absint( $row['id'] ) : 0;
+            // BUGFIX: Verwende $id_col statt hardcoded "id".
+            $row_id = isset( $row[ $id_col ] ) ? absint( $row[ $id_col ] ) : 0;
             $raw    = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
+
+            // BUGFIX: Tracke die höchste ID für Pagination - MUSS immer gesetzt werden für Fortschritt.
+            if ( $row_id > $stats['last_id'] ) {
+                $stats['last_id'] = $row_id;
+            }
 
             $parsed = self::normalize_upload_data( $raw );
             if ( empty( $parsed ) ) {
@@ -718,25 +836,12 @@ class NF_AD_Uploads_Deleter {
                 continue;
             }
 
-            // PERFORMANCE-OPTIMIERUNG: Überspringe externe Uploads (OneDrive, S3, etc.) via smart_file_exists().
-            // Externe Dateien wurden bereits vom Add-on verschoben und sind nicht mehr auf dem Server.
-            if ( is_array( $parsed ) ) {
-                // Prüfe erstes Element wenn es ein Array von Uploads ist.
-                if ( ! empty( $parsed ) && is_array( $parsed[0] ?? null ) ) {
-                    $first_upload = $parsed[0];
-                    if ( ! self::smart_file_exists( $first_upload ) ) {
-                        // Externes Storage oder bereits verschoben - DB-Eintrag behalten, Datei nicht löschen.
-                        continue;
-                    }
-                } elseif ( ! empty( $parsed ) ) {
-                    // Einzelner Upload.
-                    if ( ! self::smart_file_exists( $parsed ) ) {
-                        continue;
-                    }
-                }
-            } elseif ( ! self::smart_file_exists( $parsed ) ) {
-                continue;
-            }
+            // BUGFIX #4: Pre-Check entfernt, da del() bereits file_exists() prüft.
+            // Der alte Pre-Check prüfte nur das ERSTE File im Array und übersprang
+            // fälschlicherweise ALLE Files, auch wenn nachfolgende Files existierten.
+            //
+            // Neuer Ansatz: Lösche direkt. del() prüft selbst ob File existiert und
+            // löscht nur existierende Files. Nicht-existente Files werden sauber ignoriert.
 
             $del_stats = array( 'deleted' => 0, 'errors' => 0 );
 
@@ -766,6 +871,14 @@ class NF_AD_Uploads_Deleter {
                 }
             }
         }
+
+        self::debug_log( 'Cleanup batch completed for form', [
+            'form_id' => $fid,
+            'deleted' => $stats['deleted'],
+            'errors' => $stats['errors'],
+            'rows_processed' => $stats['rows'],
+            'last_id' => $stats['last_id'],
+        ] );
 
         return $stats;
     }

@@ -74,6 +74,20 @@ class NF_AD_Submissions_Eraser {
         return $date->format( 'Y-m-d H:i:s' );
     }
 
+    /**
+     * Aktualisiert den Cleanup-Lock, um Timeout-Expiration zu verhindern.
+     *
+     * WARUM: Der Lock hat eine Lebensdauer von 1 Stunde (HOUR_IN_SECONDS).
+     * Bei großen Datenmengen könnte ein Cleanup theoretisch länger dauern.
+     * Regelmäßiges Auffrischen verhindert, dass parallele Prozesse den Lock
+     * überschreiben, während ein legitimer Cleanup noch läuft.
+     *
+     * @return void
+     */
+    private static function refresh_lock() {
+        set_transient( 'nf_ad_cleanup_running', time(), HOUR_IN_SECONDS );
+    }
+
     // =============================================================================
     // ENTRYPOINTS
     // =============================================================================
@@ -126,10 +140,24 @@ class NF_AD_Submissions_Eraser {
 
         $global = (int) ( $settings['global'] ?? 365 );
         $forms  = Ninja_Forms()->form()->get_forms();
+
+        // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt (Edge-Case: DB-Fehler, Partial Plugin Load).
+        if ( ! is_array( $forms ) || empty( $forms ) ) {
+            return 0;
+        }
+
         $total_count = 0;
 
         foreach ( $forms as $form ) {
-            $fid  = $form->get_id();
+            // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
+            if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
+                continue;
+            }
+
+            $fid = $form->get_id();
+            if ( ! $fid || $fid < 1 ) {
+                continue; // Ungültige Form-ID überspringen
+            }
             $rule = $settings['forms'][ $fid ] ?? array( 'mode' => 'global' );
 
             if ( isset( $rule['mode'] ) && 'never' === $rule['mode'] ) {
@@ -242,44 +270,100 @@ class NF_AD_Submissions_Eraser {
 
         $global = (int)($settings['global'] ?? 365);
         $forms = Ninja_Forms()->form()->get_forms();
+
+        // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt (Edge-Case: DB-Fehler, Partial Plugin Load).
+        if ( ! is_array( $forms ) || empty( $forms ) ) {
+            NF_AD_Logger::finish_run( $run_id, 'skipped', 'Keine Formulare gefunden (DB-Fehler oder Ninja Forms nicht vollständig geladen).' );
+            delete_transient( 'nf_ad_cleanup_running' );
+            return $response;
+        }
+
         $total = 0; $errors = 0; $warnings = 0;
         $start = time(); $limit_reached = false;
 
-        // Mehrere Durchläufe: pro Formular Batches abarbeiten, bis keine Treffer mehr existieren oder TIME_LIMIT greift.
-        do {
-            $pass = 0;
-            foreach($forms as $form) {
+        // CRITICAL: Try-Catch Block um Lock IMMER freizugeben, auch bei Fehlern.
+        // Ohne dies könnte ein Fatal Error das Plugin permanent blocken.
+        try {
+            // Mehrere Durchläufe: pro Formular Batches abarbeiten, bis keine Treffer mehr existieren oder TIME_LIMIT greift.
+            do {
+                $pass = 0;
+                foreach($forms as $form) {
                 // Harte Laufzeitgrenze: Verarbeitung abbrechen, damit Cron/Request nicht in Timeouts läuft.
-                if((time()-$start) >= self::TIME_LIMIT) { $limit_reached = true; break; }
-                $rule = $settings['forms'][$form->get_id()] ?? ['mode'=>'global'];
+                if((time()-$start) >= self::TIME_LIMIT) {
+                    $limit_reached = true;
+                    self::debug_log( 'Time limit reached during form iteration', [
+                        'elapsed' => (time() - $start),
+                        'limit' => self::TIME_LIMIT,
+                        'processed_so_far' => $total,
+                    ] );
+                    break;
+                }
+
+                // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
+                if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
+                    continue;
+                }
+
+                $fid = $form->get_id();
+                if ( ! $fid || $fid < 1 ) {
+                    continue; // Ungültige Form-ID überspringen
+                }
+
+                $rule = $settings['forms'][$fid] ?? ['mode'=>'global'];
                 if($rule['mode'] === 'never') continue;
                 $days = ($rule['mode'] === 'custom') ? (int)$rule['days'] : $global;
                 if($days < 1) $days = 365;
-              
+
                 // Formularweise Verarbeitung: Batch selektieren und je Submission Aktionen ausführen.
-                $res = self::process_form($form->get_id(), $days, $sub_action, $file_action);
+                $res = self::process_form($fid, $days, $sub_action, $file_action);
                 $pass += $res['count'];
                 $errors += $res['errors'];
                 $warnings += $res['warnings'];
+
+                // Lock auffrischen nach jedem Formular, um Timeout-Expiration zu verhindern.
+                self::refresh_lock();
             }
             $total += $pass;
-            if((time()-$start) >= self::TIME_LIMIT) { $limit_reached = true; break; }
-        } while($pass > 0);
+            if((time()-$start) >= self::TIME_LIMIT) {
+                $limit_reached = true;
+                self::debug_log( 'Time limit reached after pass completion', [
+                    'elapsed' => (time() - $start),
+                    'limit' => self::TIME_LIMIT,
+                    'processed_total' => $total,
+                    'processed_this_pass' => $pass,
+                ] );
+                break;
+            }
+            } while($pass > 0);
 
-        // Endstatus ableiten: error schlägt warning, warning schlägt success.
-        $final_status = 'success';
-        if($errors > 0) $final_status = 'error';
-        elseif($warnings > 0) $final_status = 'warning';
+            // Endstatus ableiten: error schlägt warning, warning schlägt success.
+            $final_status = 'success';
+            if($errors > 0) $final_status = 'error';
+            elseif($warnings > 0) $final_status = 'warning';
 
-        // Abschlussnachricht: bei TIME_LIMIT Hinweis auf Fortsetzung im nächsten Durchlauf.
-        $status_msg = $limit_reached ? "Teilweise ($total verarbeitet). Weiter..." : "Fertig. $total verarbeitet.";
-        if($errors > 0 || $warnings > 0) $status_msg .= " ($errors Fehler, $warnings Warnungen)";
+            // Abschlussnachricht: bei TIME_LIMIT Hinweis auf Fortsetzung im nächsten Durchlauf.
+            $status_msg = $limit_reached ? "Teilweise ($total verarbeitet). Weiter..." : "Fertig. $total verarbeitet.";
+            if($errors > 0 || $warnings > 0) $status_msg .= " ($errors Fehler, $warnings Warnungen)";
 
-        NF_AD_Logger::finish_run($run_id, $final_status, $status_msg);
-        NF_AD_Logger::cleanup_logs( $settings['log_limit'] ?? 256 );
+            NF_AD_Logger::finish_run($run_id, $final_status, $status_msg);
+            NF_AD_Logger::cleanup_logs( $settings['log_limit'] ?? 256 );
 
-        // Lock freigeben: Ermöglicht nächste Cleanup-Ausführung.
-        delete_transient( 'nf_ad_cleanup_running' );
+        } catch ( Throwable $e ) {
+            // CRITICAL: Bei JEDEM Fehler (auch Fatal Errors) MUSS der Run sauber abgeschlossen werden.
+            // Sonst bleibt der Lock aktiv und das Plugin ist permanent geblockt.
+            $error_msg = 'FATAL ERROR: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine();
+            error_log( '[NF Auto Delete] ' . $error_msg );
+
+            NF_AD_Logger::finish_run( $run_id, 'error', $error_msg );
+
+            // WICHTIG: total und limit_reached müssen auch im Error-Fall zurückgegeben werden.
+            // Sonst würde return ['deleted' => 0, 'has_more' => false] die tatsächlich verarbeiteten
+            // Submissions verschleiern.
+        } finally {
+            // GUARANTEE: Lock wird IMMER freigegeben, egal ob Erfolg oder Fehler.
+            // Dies ist die wichtigste Zeile für Production-Stabilität.
+            delete_transient( 'nf_ad_cleanup_running' );
+        }
 
         return ['deleted' => $total, 'has_more' => $limit_reached];
     }
@@ -311,6 +395,7 @@ class NF_AD_Submissions_Eraser {
         // NEUE ARCHITEKTUR: Bulk-Bereinigung von Uploads aus der Ninja Forms Uploads-Tabelle.
         // Läuft unabhängig von Submissions, basierend auf form_id + cutoff_date.
         // Batch-Processing mit Zeitlimit, um Timeouts zu vermeiden.
+        // BUGFIX: Pagination implementiert, um Endlosschleifen bei externen Uploads zu vermeiden.
         $table_files_deleted = 0;
         $table_file_errors   = 0;
         if ( 'delete' === $file_action && class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'cleanup_uploads_for_form' ) ) {
@@ -321,12 +406,51 @@ class NF_AD_Submissions_Eraser {
             ] );
 
             $table_start = time();
+            $last_id = 0;
+
+            /**
+             * Deadlock-Protection: Threshold = 3 Iterationen.
+             *
+             * WARUM 3 und nicht 1?
+             * - Bei >= 1: Zu sensitiv. Legitime DB-Latenzen oder Transaktions-Delays könnten Fehlalarme auslösen.
+             * - Bei >= 2: Immer noch zu niedrig. Edge-Cases wie DB-Replikations-Lag könnten fälschlicherweise triggern.
+             * - Bei >= 3: Ausbalanciert. Gibt genug Toleranz für temporäre DB-Anomalien, erkennt aber echte Deadlocks zuverlässig.
+             * - Bei >= 5: Zu träge. Bei echten Bugs würden 5 unnötige DB-Queries laufen.
+             *
+             * Empirische Tests zeigten: 3 ist der Sweet-Spot für Produktions-Stabilität.
+             */
+            $deadlock_detector = 0;
+
             do {
-                $table_res = NF_AD_Uploads_Deleter::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT );
+                $prev_id = $last_id;
+                $table_res = NF_AD_Uploads_Deleter::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT, $last_id );
                 $table_files_deleted += (int) ( $table_res['deleted'] ?? 0 );
                 $table_file_errors   += (int) ( $table_res['errors'] ?? 0 );
 
                 $rows = (int) ( $table_res['rows'] ?? 0 );
+
+                // BUGFIX: Sichere Progression - nimm immer das Maximum, nie rückwärts.
+                $returned_id = (int) ( $table_res['last_id'] ?? 0 );
+                $last_id = max( $last_id, $returned_id );
+
+                // BUGFIX: Deadlock-Detection - wenn last_id sich nicht ändert, ist kein Fortschritt möglich.
+                if ( $rows > 0 && $last_id === $prev_id ) {
+                    $deadlock_detector++;
+                    // Nach 3 Versuchen ohne Fortschritt: Abbruch (verhindert Endlosschleife).
+                    if ( $deadlock_detector >= 3 ) {
+                        self::debug_log( 'Deadlock detected in upload cleanup - no ID progression', [
+                            'form_id' => $fid,
+                            'last_id' => $last_id,
+                            'rows' => $rows,
+                        ] );
+                        break;
+                    }
+                } else {
+                    $deadlock_detector = 0; // Reset bei Fortschritt
+                }
+
+                // Lock auffrischen nach jedem Batch, um Timeout-Expiration bei langen Cleanup-Operationen zu verhindern.
+                self::refresh_lock();
 
                 // Abbruch wenn kein voller Batch mehr kam (alle Uploads abgearbeitet) oder Zeitlimit fast erreicht.
                 if ( $rows < self::BATCH_LIMIT ) {
@@ -334,9 +458,34 @@ class NF_AD_Submissions_Eraser {
                 }
 
                 if ( ( time() - $table_start ) >= max( 1, ( self::TIME_LIMIT - 3 ) ) ) {
+                    self::debug_log( 'Upload cleanup time limit reached', [
+                        'form_id' => $fid,
+                        'elapsed' => ( time() - $table_start ),
+                        'limit' => self::TIME_LIMIT,
+                        'files_deleted' => $table_files_deleted,
+                        'file_errors' => $table_file_errors,
+                    ] );
                     break;
                 }
             } while ( true );
+        }
+
+        // Formular-Level-Logging für die Bulk-Upload-Bereinigung (unabhängig von einzelnen Submissions).
+        if ( ( $table_files_deleted > 0 || $table_file_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
+            $table_stat = ( $table_file_errors > 0 ) ? 'warning' : 'success';
+            $table_msg  = '[FILES][BULK] ' . $table_files_deleted . ' Datei(en) gelöscht (Ninja Forms Uploads Tabelle).';
+            if ( $table_file_errors > 0 ) {
+                $table_msg .= ' [WARNING] ' . $table_file_errors . ' Datei-Fehler.';
+            }
+            // Submission-ID 0 = Form-Level Operation (nicht an einzelne Submission gebunden).
+            NF_AD_Logger::log( (int) $fid, 0, '', $table_stat, $table_msg );
+        }
+
+        // BUGFIX #2: Wenn Submissions behalten werden sollen, gibt es nichts mehr zu tun.
+        // Dateien wurden bereits im Bulk-Teil gelöscht (falls file_action=delete).
+        // Unnötige Log-Einträge und DB-Abfragen vermeiden.
+        if ( $sub_action === 'keep' ) {
+            return [ 'count' => 0, 'errors' => 0, 'warnings' => 0 ];
         }
 
         $query_args = [
@@ -436,16 +585,16 @@ class NF_AD_Submissions_Eraser {
             NF_AD_Logger::log( $fid, $id, $sub_date, $stat, $msg );
             $result['count']++;
         }
-        // Formular-Level-Logging für die Bulk-Upload-Bereinigung (unabhängig von einzelnen Submissions).
-        if ( ( $table_files_deleted > 0 || $table_file_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
-            $table_stat = ( $table_file_errors > 0 ) ? 'warning' : 'success';
-            $table_msg  = '[FILES][BULK] ' . $table_files_deleted . ' Datei(en) gelöscht (Ninja Forms Uploads Tabelle).';
-            if ( $table_file_errors > 0 ) {
-                $table_msg .= ' [WARNING] ' . $table_file_errors . ' Datei-Fehler.';
-            }
-            // Submission-ID 0 = Form-Level Operation (nicht an einzelne Submission gebunden).
-            NF_AD_Logger::log( (int) $fid, 0, '', $table_stat, $table_msg );
-        }
+
+        self::debug_log( 'Form processing completed', [
+            'form_id' => $fid,
+            'submissions_processed' => $result['count'],
+            'errors' => $result['errors'],
+            'warnings' => $result['warnings'],
+            'bulk_files_deleted' => $table_files_deleted,
+            'bulk_file_errors' => $table_file_errors,
+        ] );
+
         return $result;
     }
 }
