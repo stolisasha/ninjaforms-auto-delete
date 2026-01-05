@@ -26,6 +26,62 @@ class NF_AD_Logger {
      */
     const TABLE_RUNS = 'nf_ad_cron_runs';
 
+    // =============================================================================
+    // DB RETRY LOGIC
+    // =============================================================================
+
+    /**
+     * Führt eine DB-Operation mit Retry-Logic aus (Exponential Backoff).
+     * Schützt vor temporären Deadlocks und Connection-Errors.
+     *
+     * @param callable $callback      Die DB-Operation als Callback (sollte true/false zurückgeben).
+     * @param int      $max_attempts  Maximale Anzahl Versuche (Standard: 3).
+     *
+     * @return bool True bei Erfolg, false bei Fehler.
+     */
+    private static function db_query_with_retry( $callback, $max_attempts = 3 ) {
+        global $wpdb;
+
+        $attempt = 0;
+        $last_error = '';
+
+        while ( $attempt < $max_attempts ) {
+            $attempt++;
+
+            try {
+                $result = $callback();
+
+                // Erfolg: Query hat funktioniert.
+                if ( false !== $result ) {
+                    return $result;
+                }
+
+                // Fehler: DB-Error auslesen.
+                $last_error = $wpdb->last_error ?? 'Unknown DB error';
+
+                // Wenn kein Deadlock, dann abbrechen (kein Retry bei anderen Fehlern).
+                if ( false === stripos( $last_error, 'deadlock' ) && false === stripos( $last_error, 'lock wait timeout' ) ) {
+                    break;
+                }
+
+            } catch ( Exception $e ) {
+                $last_error = $e->getMessage();
+            }
+
+            // Exponential Backoff: 0.5s, 1s, 2s (verhindert Thundering Herd).
+            if ( $attempt < $max_attempts ) {
+                usleep( (int) ( pow( 2, $attempt - 1 ) * 500000 ) );
+            }
+        }
+
+        // Alle Versuche fehlgeschlagen: Fehler loggen.
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log( "[NF Auto Delete] DB query failed after {$attempt} attempts: {$last_error}" );
+        }
+
+        return false;
+    }
+
 
     // =============================================================================
     // DB SETUP
@@ -46,7 +102,8 @@ class NF_AD_Logger {
     }
 
     /**
-     * Erstellt die DB-Tabellen für Logs und Cron-Runs (dbDelta).
+     * Erstellt die Datenbank-Tabellen für Logs und Cron-Runs.
+     * Nutzt dbDelta für sichere Schema-Upgrades (idempotent).
      *
      * @return void
      */
@@ -58,7 +115,7 @@ class NF_AD_Logger {
         $logs_table = $wpdb->prefix . self::TABLE_LOGS;
         $runs_table = $wpdb->prefix . self::TABLE_RUNS;
 
-        // dbDelta-Kompatibilität: keine Engine-Angabe in der CREATE TABLE Definition.
+        // dbDelta-Kompatibilität: Keine Engine-Angabe in der CREATE TABLE Definition (wird von WordPress gesetzt).
         dbDelta( "CREATE TABLE $logs_table (
             id mediumint(9) NOT NULL AUTO_INCREMENT,
             time datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
@@ -106,7 +163,7 @@ class NF_AD_Logger {
                 $title = $form_obj->get_setting( 'title' );
             }
         }
-        $wpdb->insert(
+        $result = $wpdb->insert(
             $wpdb->prefix . self::TABLE_LOGS,
             [
                 'time'            => current_time( 'mysql' ),
@@ -119,6 +176,11 @@ class NF_AD_Logger {
             ],
             [ '%s', '%d', '%s', '%d', '%s', '%s', '%s' ]
         );
+
+        // ERROR-LOGGING: Wenn Log-Eintrag fehlschlägt, trotzdem weitermachen (non-blocking).
+        if ( false === $result && ! empty( $wpdb->last_error ) ) {
+            error_log( '[NF Auto Delete] Failed to write log entry: ' . $wpdb->last_error );
+        }
     }
 
     // =============================================================================
@@ -128,11 +190,14 @@ class NF_AD_Logger {
     /* --- Run Lifecycle --- */
 
     /**
-     * Startet einen Cron-Run und markiert verwaiste Runs als Timeout.
+     * Startet einen neuen Cleanup-Run und markiert verwaiste Runs als Timeout.
      *
-     * @param string $msg Startnachricht.
+     * WICHTIG: Verwaiste Runs (älter als 1 Stunde, Status "running") werden automatisch
+     * als "error" markiert, um Ghost-Runs nach Server-Crashes zu bereinigen.
      *
-     * @return int Insert-ID des Runs.
+     * @param string $msg Startnachricht für den Log.
+     *
+     * @return int Insert-ID des neu gestarteten Runs.
      */
     public static function start_run( $msg = 'Bereinigung gestartet...' ) {
         global $wpdb;
@@ -149,12 +214,15 @@ class NF_AD_Logger {
         // Zeitstempel auf Basis der WordPress-Zeit für den Timeout-Check.
         $one_hour_ago = wp_date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - HOUR_IN_SECONDS );
 
-        $wpdb->query(
-            $wpdb->prepare(
-                "UPDATE $table SET status = 'error', message = CONCAT(message, ' [Timeout]') WHERE status = 'running' AND time < %s",
-                $one_hour_ago
-            )
-        );
+        // DB-RETRY: Timeout-Update mit Retry-Logic (schützt vor Deadlocks).
+        self::db_query_with_retry( function() use ( $wpdb, $table, $one_hour_ago ) {
+            return $wpdb->query(
+                $wpdb->prepare(
+                    "UPDATE $table SET status = 'error', message = CONCAT(message, ' [Timeout]') WHERE status = 'running' AND time < %s",
+                    $one_hour_ago
+                )
+            );
+        } );
         $wpdb->insert(
             $table,
             [
@@ -168,10 +236,13 @@ class NF_AD_Logger {
     }
 
     /**
-     * Beendet einen Cron-Run und aktualisiert Status sowie Nachricht.
+     * Beendet einen Cleanup-Run und aktualisiert Status sowie Nachricht.
      *
-     * @param int    $run_id Run-ID.
-     * @param string $status Neuer Status.
+     * Behält das Run-Typ-Tag ([CRON] oder [MANUAL]) aus der Startnachricht bei,
+     * damit im Dashboard zwischen automatischen und manuellen Runs unterschieden werden kann.
+     *
+     * @param int    $run_id Run-ID (vom start_run() zurückgegeben).
+     * @param string $status Endstatus ('success', 'error', 'warning', 'skipped').
      * @param string $msg    Abschlussnachricht.
      *
      * @return void
@@ -184,7 +255,7 @@ class NF_AD_Logger {
 
         $table = $wpdb->prefix . self::TABLE_RUNS;
 
-        // Run-Typ-Tag ([CRON] / [MANUAL]) aus der Startnachricht übernehmen.
+        // Run-Typ-Tag ([CRON] / [MANUAL]) aus der Startnachricht extrahieren und beibehalten.
         $existing_msg = $wpdb->get_var( $wpdb->prepare( "SELECT message FROM $table WHERE id = %d", $run_id ) );
         if ( is_string( $existing_msg ) ) {
             if ( preg_match( '/^(\[(CRON|MANUAL)\])\s+/i', $existing_msg, $m ) ) {
@@ -357,10 +428,12 @@ class NF_AD_Logger {
     }
 
     /**
-     * Entfernt alte Cron-Run-Einträge und behält die letzten $keep Runs.
-     * Laufende Runs bleiben erhalten.
+     * Entfernt alte Cron-Run-Einträge und behält nur die letzten N Runs.
      *
-     * @param int $keep Anzahl der zu behaltenden Runs.
+     * WICHTIG: Laufende Runs (status='running') werden NICHT gelöscht,
+     * auch wenn sie älter als das Limit sind (Schutz vor versehentlichem Löschen aktiver Runs).
+     *
+     * @param int $keep Anzahl der zu behaltenden Runs (Minimum: 10).
      *
      * @return void
      */

@@ -118,6 +118,86 @@ function nf_ad_init() {
 }
 
 // =============================================================================
+// HEALTHCHECK REST-API
+// =============================================================================
+
+/* --- REST-API Endpoint für Monitoring --- */
+add_action( 'rest_api_init', 'nf_ad_register_healthcheck' );
+
+/**
+ * Registriert den Healthcheck-Endpoint für Monitoring-Tools.
+ *
+ * Endpoint: GET /wp-json/nf-ad/v1/health
+ * Gibt Status-Informationen über das Plugin zurück (Tabellen, letzter Run, nächster Cron).
+ *
+ * @return void
+ */
+function nf_ad_register_healthcheck() {
+    register_rest_route( 'nf-ad/v1', '/health', [
+        'methods'             => 'GET',
+        'callback'            => 'nf_ad_healthcheck',
+        'permission_callback' => function() {
+            // Nur für Admins zugänglich (Sicherheit).
+            return current_user_can( 'manage_options' );
+        },
+    ]);
+}
+
+/**
+ * Healthcheck-Callback: Gibt Plugin-Status zurück.
+ *
+ * @return WP_REST_Response
+ */
+function nf_ad_healthcheck() {
+    global $wpdb;
+
+    $health = [
+        'status'         => 'healthy',
+        'version'        => NF_AD_VERSION,
+        'db_version'     => NF_AD_DB_VERSION,
+        'last_run'       => null,
+        'next_scheduled' => null,
+        'tables_exist'   => false,
+        'cron_active'    => false,
+        'lock_active'    => false,
+    ];
+
+    // Prüfe ob Datenbank-Tabellen existieren.
+    $logs_table = $wpdb->prefix . 'nf_ad_logs';
+    $runs_table = $wpdb->prefix . 'nf_ad_cron_runs';
+
+    $logs_exist = (bool) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $logs_table ) );
+    $runs_exist = (bool) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $runs_table ) );
+
+    $health['tables_exist'] = ( $logs_exist && $runs_exist );
+
+    // Letzter Cron-Run (wenn Tabelle existiert).
+    if ( $runs_exist ) {
+        $last_run = $wpdb->get_row(
+            "SELECT time, status FROM {$runs_table} ORDER BY id DESC LIMIT 1"
+        );
+        if ( $last_run ) {
+            $health['last_run'] = [
+                'time'   => $last_run->time,
+                'status' => $last_run->status,
+            ];
+        }
+    }
+
+    // Nächster geplanter Cron-Lauf.
+    $next = wp_next_scheduled( 'nf_ad_daily_event' );
+    if ( $next ) {
+        $health['next_scheduled'] = wp_date( 'Y-m-d H:i:s', $next );
+        $health['cron_active']    = true;
+    }
+
+    // Deadlock-Protection: Ist ein Cleanup gerade aktiv?
+    $health['lock_active'] = (bool) get_transient( 'nf_ad_cleanup_running' );
+
+    return rest_ensure_response( $health );
+}
+
+// =============================================================================
 // AKTIVIERUNG / DEAKTIVIERUNG
 // =============================================================================
 
@@ -125,9 +205,10 @@ function nf_ad_init() {
 register_activation_hook( __FILE__, 'nf_ad_activate' );
 
 /**
- * Activation-Hook.
+ * Aktivierungs-Hook.
  *
- * Erstellt/aktualisiert die Log-Tabellen und setzt die DB-Version.
+ * Erstellt/aktualisiert die Log-Tabellen und setzt die Datenbank-Version.
+ * Räumt bestehende Cron-Events auf, um Doppel-Planungen zu vermeiden.
  *
  * @return void
  */
@@ -145,9 +226,10 @@ function nf_ad_activate() {
 register_deactivation_hook( __FILE__, 'nf_ad_deactivate' );
 
 /**
- * Deactivation-Hook.
+ * Deaktivierungs-Hook.
  *
  * Entfernt geplante Cron-Events des Plugins.
+ * Tabellen und Daten bleiben erhalten (nur bei Deinstallation über uninstall.php gelöscht).
  *
  * @return void
  */

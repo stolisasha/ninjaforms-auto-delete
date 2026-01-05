@@ -21,16 +21,18 @@ class NF_AD_Uploads_Deleter {
     /* --- Entry-Point: Submission Cleanup --- */
 
     /**
-     * Cached schema for the uploads table.
+     * Gecachtes Schema der Uploads-Tabelle (Performance-Optimierung).
+     * Wird einmalig pro Request geladen und wiederverwendet.
      *
      * @var array{columns:array<int,string>,types:array<string,string>}|null
      */
     private static $uploads_table_schema = null;
 
     /**
-     * Get uploads table schema (columns + MySQL types) with caching.
+     * Lädt das Schema der Uploads-Tabelle (Spalten + MySQL-Typen) mit Caching.
+     * Vermeidet wiederholte DESCRIBE-Queries bei mehrfachen Aufrufen.
      *
-     * @param string $table Table name.
+     * @param string $table Tabellenname.
      *
      * @return array{columns:array<int,string>,types:array<string,string>}
      */
@@ -65,11 +67,14 @@ class NF_AD_Uploads_Deleter {
     }
 
     /**
-     * Detect a usable date column for the uploads table.
+     * Erkennt welche Datums-Spalte für die Alters-Filterung genutzt werden soll.
      *
-     * @param array<int,string> $columns Columns list.
+     * WICHTIG: Ninja Forms File Uploads nutzt je nach Version unterschiedliche Spalten.
+     * Wir prüfen alle gängigen Varianten in Reihenfolge der Wahrscheinlichkeit.
      *
-     * @return string|null
+     * @param array<int,string> $columns Liste der Spaltennamen.
+     *
+     * @return string|null Gefundene Datums-Spalte oder null.
      */
     private static function detect_uploads_date_column( $columns ) {
         foreach ( array( 'date_updated', 'updated_at', 'date_modified', 'modified_at', 'created_at', 'date_created', 'created', 'created_on', 'date_added', 'date', 'timestamp' ) as $c ) {
@@ -81,12 +86,15 @@ class NF_AD_Uploads_Deleter {
     }
 
     /**
-     * Detect whether a column type is an integer timestamp.
+     * Prüft ob eine Spalte ein Integer-Timestamp ist (statt DATETIME).
      *
-     * @param string|null $col Column name.
-     * @param array<string,string> $types Types map.
+     * Manche Add-on-Versionen nutzen INT-Unix-Timestamps, andere DATETIME-Strings.
+     * Diese Methode erkennt den Typ anhand der MySQL-Type-Definition.
      *
-     * @return bool
+     * @param string|null $col Spaltenname.
+     * @param array<string,string> $types Map von Spaltenname → MySQL-Typ.
+     *
+     * @return bool True wenn Integer-Typ, false wenn DATETIME/VARCHAR.
      */
     private static function is_int_timestamp_column( $col, $types ) {
         if ( ! $col || ! isset( $types[ $col ] ) ) {
@@ -161,13 +169,10 @@ class NF_AD_Uploads_Deleter {
             $cutoff_obj = current_datetime()->modify( '-' . max( 1, absint( $days ) ) . ' days' );
             $cutoff     = $cutoff_obj->format( 'Y-m-d H:i:s' );
 
-            // Upload-Tabellen-basierte Zählung (primär, schnell).
+            // NEUE ARCHITEKTUR: Nur noch Tabellen-basierte Zählung.
+            // Meta-basierte Legacy-Uploads werden ignoriert (klare Trennung: nur Ninja Forms Uploads Add-on Tabelle).
             $table_count = self::count_from_uploads_table( $fid, $cutoff );
             $total_count += $table_count;
-
-            // Meta-basierte Zählung (fallback für legacy/gemischte Installationen).
-            $meta_count = self::count_from_submission_meta( $fid, $cutoff, $settings );
-            $total_count += $meta_count;
         }
 
         return $total_count;
@@ -206,22 +211,9 @@ class NF_AD_Uploads_Deleter {
         $date_col = self::detect_uploads_date_column( $uploads_columns );
         $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
 
-        // Prüfe ob submission_id Spalte existiert.
-        $sub_col = null;
-        foreach ( array( 'submission_id', 'sub_id', 'submission', 'nf_sub_id' ) as $c ) {
-            if ( in_array( $c, $uploads_columns, true ) ) {
-                $sub_col = $c;
-                break;
-            }
-        }
-
-        // Wenn submission_id Spalte existiert, werden diese Uploads von cleanup_files() gelöscht.
-        // Wir zählen hier NUR Uploads OHNE submission_id, um Doppelzählung zu vermeiden.
-        if ( $sub_col ) {
-            // Tabelle hat submission_id → Diese Uploads werden per-submission gezählt.
-            // Wir überspringen die Zählung hier komplett.
-            return 0;
-        }
+        // NEUE ARCHITEKTUR: Wir löschen ALLE Uploads basierend auf form_id + cutoff_date.
+        // Die submission_id ist für die Alters-Prüfung irrelevant!
+        // Uploads werden unabhängig von Submissions gelöscht (klare Trennung der Verantwortlichkeiten).
 
         if ( ! $data_col || ! $date_col || ! $form_col ) {
             return 0;
@@ -642,14 +634,15 @@ class NF_AD_Uploads_Deleter {
     }
 
     /**
-     * Cleanup uploads from the official Ninja Forms File Uploads add-on table by form + cutoff.
+     * Bereinigt Uploads aus der offiziellen Ninja Forms File Uploads Add-on Tabelle.
      *
-     * This is the safe way for installations where uploads are stored independently from submissions
-     * (e.g., table has no submission_id column).
+     * NEUE ARCHITEKTUR: Löscht ALLE Uploads basierend auf form_id + cutoff_date.
+     * Die submission_id ist irrelevant - Uploads werden unabhängig von Submissions gelöscht.
+     * Dies ermöglicht klare Trennung: Uploads Deleter = Files, Submissions Eraser = Submissions.
      *
-     * @param int    $fid    Form ID.
-     * @param string $cutoff Cutoff datetime in 'Y-m-d H:i:s' (site timezone).
-     * @param int    $limit  Max rows per batch.
+     * @param int    $fid    Formular-ID.
+     * @param string $cutoff Cutoff-Datum im Format 'Y-m-d H:i:s' (WordPress-Zeitzone).
+     * @param int    $limit  Maximale Anzahl Zeilen pro Batch.
      *
      * @return array{deleted:int,errors:int,rows:int}
      */
@@ -694,7 +687,7 @@ class NF_AD_Uploads_Deleter {
         $deleted_sql = '';
         $deleted_params = array();
 
-        // Try to match the add-on UI by excluding deleted/trashed uploads if possible.
+        // Versuche, bereits als gelöscht markierte Uploads auszuschließen (matching mit Add-on UI).
         if ( $deleted_col ) {
             if ( 'status' === $deleted_col ) {
                 $deleted_sql    = " AND {$deleted_col} NOT IN (%s,%s)";
@@ -704,7 +697,7 @@ class NF_AD_Uploads_Deleter {
             }
         }
 
-        // Fetch candidate rows (id + data) for this form older than cutoff.
+        // Lade Kandidaten-Zeilen (id + data) für dieses Formular, die älter als Cutoff sind.
         $sql  = "SELECT id, {$data_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} ORDER BY id ASC LIMIT %d";
         $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $limit ) );
         $rows = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A );
@@ -725,18 +718,18 @@ class NF_AD_Uploads_Deleter {
                 continue;
             }
 
-            // OPTIMIERUNG: Überspringe externe Uploads (OneDrive, S3, etc.) mit smart_file_exists().
-            // Wenn die Datei nicht auf dem Server ist, müssen wir sie nicht löschen.
+            // PERFORMANCE-OPTIMIERUNG: Überspringe externe Uploads (OneDrive, S3, etc.) via smart_file_exists().
+            // Externe Dateien wurden bereits vom Add-on verschoben und sind nicht mehr auf dem Server.
             if ( is_array( $parsed ) ) {
-                // Check first item if it's an array of uploads.
+                // Prüfe erstes Element wenn es ein Array von Uploads ist.
                 if ( ! empty( $parsed ) && is_array( $parsed[0] ?? null ) ) {
                     $first_upload = $parsed[0];
                     if ( ! self::smart_file_exists( $first_upload ) ) {
-                        // Externe Storage oder bereits verschoben - DB-Eintrag behalten, nichts löschen.
+                        // Externes Storage oder bereits verschoben - DB-Eintrag behalten, Datei nicht löschen.
                         continue;
                     }
                 } elseif ( ! empty( $parsed ) ) {
-                    // Single upload data.
+                    // Einzelner Upload.
                     if ( ! self::smart_file_exists( $parsed ) ) {
                         continue;
                     }
@@ -762,9 +755,15 @@ class NF_AD_Uploads_Deleter {
             $stats['deleted'] += $del_stats['deleted'];
             $stats['errors']  += $del_stats['errors'];
 
-            // Only remove the DB record if we successfully deleted at least one file and had no errors for this row.
+            // Nur DB-Eintrag löschen wenn mindestens eine Datei erfolgreich gelöscht wurde UND keine Fehler auftraten.
             if ( $row_id && $del_stats['deleted'] > 0 && 0 === $del_stats['errors'] ) {
-                $wpdb->delete( $uploads_table, [ 'id' => $row_id ], [ '%d' ] );
+                $result = $wpdb->delete( $uploads_table, [ 'id' => $row_id ], [ '%d' ] );
+
+                // ERROR-LOGGING: DB-Fehler protokollieren für Debugging.
+                if ( false === $result && ! empty( $wpdb->last_error ) ) {
+                    error_log( '[NF Auto Delete] DB delete failed for upload ID ' . $row_id . ': ' . $wpdb->last_error );
+                    $stats['errors']++;
+                }
             }
         }
 
