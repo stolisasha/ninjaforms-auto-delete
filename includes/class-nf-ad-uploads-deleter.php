@@ -860,8 +860,28 @@ class NF_AD_Uploads_Deleter {
             $stats['deleted'] += $del_stats['deleted'];
             $stats['errors']  += $del_stats['errors'];
 
-            // Nur DB-Eintrag löschen wenn mindestens eine Datei erfolgreich gelöscht wurde UND keine Fehler auftraten.
-            if ( $row_id && $del_stats['deleted'] > 0 && 0 === $del_stats['errors'] ) {
+            // BUGFIX (Code-Audit): DB-Eintrag löschen wenn KEINE Fehler auftraten (unabhängig von deleted).
+            //
+            // WARUM diese Änderung?
+            // Alte Logik: Nur löschen wenn `deleted > 0` UND `errors = 0`
+            // Problem: Wenn Dateien bereits manuell gelöscht wurden (z.B. via FTP):
+            //   - deleted = 0 (keine Datei wurde gelöscht, weil keine existierte)
+            //   - errors = 0 (kein Fehler)
+            //   - DB-Zeile blieb bestehen → "Zombie Row"
+            //   - Bei jedem Cron-Run wurde dieselbe Zeile wieder geprüft (Performance-Problem)
+            //
+            // Neue Logik: Löschen wenn `errors = 0` (unabhängig von deleted-Wert)
+            // Rationale:
+            //   - errors = 0 bedeutet: "Alles okay, keine Probleme aufgetreten"
+            //   - Entweder wurden Dateien gelöscht (deleted > 0) → Ziel erreicht
+            //   - ODER Dateien existieren nicht mehr (deleted = 0) → Ziel bereits erreicht
+            //   - In beiden Fällen ist der DB-Eintrag obsolet und sollte weg
+            //
+            // Sicherheit:
+            //   - Wenn echte Fehler auftreten (Permission Denied, etc.): errors > 0
+            //   - Dann wird DB-Zeile NICHT gelöscht (konservativ, sicher)
+            //   - Beim nächsten Run wird erneut versucht
+            if ( $row_id && 0 === $del_stats['errors'] ) {
                 $result = $wpdb->delete( $uploads_table, [ 'id' => $row_id ], [ '%d' ] );
 
                 // ERROR-LOGGING: DB-Fehler protokollieren für Debugging.
