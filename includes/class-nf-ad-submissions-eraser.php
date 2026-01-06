@@ -10,7 +10,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 /**
  * Führt die automatische und manuelle Bereinigung von Ninja-Forms-Submissions durch.
- * Optional werden zugehörige Upload-Dateien bereinigt.
+ *
+ * ARCHITEKTUR (seit v2.2):
+ * - Diese Klasse kümmert sich NUR um Submissions (Single Responsibility)
+ * - Upload-Bereinigung erfolgt über NF_AD_Uploads_Deleter (eigene Klasse)
+ * - run_cleanup_logic() fungiert als ORCHESTRATOR und koordiniert beide Prozesse
+ * - Beide Zähler (Submissions + Dateien) werden separat getracked und im Log angezeigt
  */
 class NF_AD_Submissions_Eraser {
     // =============================================================================
@@ -217,8 +222,13 @@ class NF_AD_Submissions_Eraser {
 
     /**
      * Zentrale Bereinigungsroutine für Cron und manuelle Ausführung.
-     * Arbeitet in mehreren Durchläufen, bis keine passenden Submissions mehr gefunden werden
-     * oder das Zeitlimit erreicht ist.
+     *
+     * ARCHITEKTUR: Diese Methode fungiert als ORCHESTRATOR und koordiniert:
+     * 1) NF_AD_Uploads_Deleter::run_cleanup() - Bereinigt Upload-Dateien
+     * 2) NF_AD_Submissions_Eraser::process_form() - Bereinigt Submissions
+     *
+     * Beide Prozesse laufen unabhängig voneinander und haben eigene Zähler.
+     * Die finale Status-Nachricht zeigt beide Werte separat an.
      *
      * @param bool $is_cron true bei Cron-Ausführung.
      *
@@ -243,7 +253,7 @@ class NF_AD_Submissions_Eraser {
 
         $settings = NF_AD_Dashboard::get_settings();
 
-        $sub_action = $settings['sub_handling'] ?? 'keep';
+        $sub_action  = $settings['sub_handling'] ?? 'keep';
         $file_action = $settings['file_handling'] ?? 'keep';
 
         $mode_info = "Subs=$sub_action, Files=$file_action";
@@ -268,84 +278,159 @@ class NF_AD_Submissions_Eraser {
             return $response;
         }
 
-        $global = (int)($settings['global'] ?? 365);
-        $forms = Ninja_Forms()->form()->get_forms();
+        // =========================================================================
+        // ORCHESTRATOR: Koordiniert beide Cleanup-Prozesse
+        // =========================================================================
 
-        // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt (Edge-Case: DB-Fehler, Partial Plugin Load).
-        if ( ! is_array( $forms ) || empty( $forms ) ) {
-            NF_AD_Logger::finish_run( $run_id, 'skipped', 'Keine Formulare gefunden (DB-Fehler oder Ninja Forms nicht vollständig geladen).' );
-            delete_transient( 'nf_ad_cleanup_running' );
-            return $response;
-        }
-
-        $total = 0; $errors = 0; $warnings = 0;
-        $start = time(); $limit_reached = false;
+        $total_subs    = 0;  // Zähler für verarbeitete Submissions
+        $total_files   = 0;  // Zähler für gelöschte Dateien
+        $errors        = 0;
+        $warnings      = 0;
+        $limit_reached = false;
 
         // CRITICAL: Try-Catch Block um Lock IMMER freizugeben, auch bei Fehlern.
         // Ohne dies könnte ein Fatal Error das Plugin permanent blocken.
         try {
-            // Mehrere Durchläufe: pro Formular Batches abarbeiten, bis keine Treffer mehr existieren oder TIME_LIMIT greift.
-            do {
-                $pass = 0;
-                foreach($forms as $form) {
-                // Harte Laufzeitgrenze: Verarbeitung abbrechen, damit Cron/Request nicht in Timeouts läuft.
-                if((time()-$start) >= self::TIME_LIMIT) {
+            // =====================================================================
+            // PHASE 1: Upload-Bereinigung (unabhängig von Submissions)
+            // =====================================================================
+            // Der Uploads_Deleter kümmert sich komplett eigenständig um:
+            // - Iteration durch alle Formulare
+            // - Anwendung der Fristen-Regeln
+            // - Batch-Processing mit Zeitlimit
+            // - Eigenes Logging pro Formular
+            if ( 'delete' === $file_action && class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'run_cleanup' ) ) {
+                self::debug_log( 'Starting uploads cleanup phase' );
+
+                $upload_result = NF_AD_Uploads_Deleter::run_cleanup( $is_cron );
+
+                $total_files += (int) ( $upload_result['deleted'] ?? 0 );
+                $errors      += (int) ( $upload_result['errors'] ?? 0 );
+
+                // Wenn Upload-Cleanup das Zeitlimit erreicht hat, trotzdem mit Submissions weitermachen.
+                // Das Zeitlimit gilt pro Phase, nicht global.
+                if ( ! empty( $upload_result['has_more'] ) ) {
                     $limit_reached = true;
-                    self::debug_log( 'Time limit reached during form iteration', [
-                        'elapsed' => (time() - $start),
-                        'limit' => self::TIME_LIMIT,
-                        'processed_so_far' => $total,
+                    self::debug_log( 'Upload cleanup hit time limit', [
+                        'files_deleted' => $total_files,
                     ] );
-                    break;
                 }
 
-                // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
-                if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
-                    continue;
-                }
-
-                $fid = $form->get_id();
-                if ( ! $fid || $fid < 1 ) {
-                    continue; // Ungültige Form-ID überspringen
-                }
-
-                $rule = $settings['forms'][$fid] ?? ['mode'=>'global'];
-                if($rule['mode'] === 'never') continue;
-                $days = ($rule['mode'] === 'custom') ? (int)$rule['days'] : $global;
-                if($days < 1) $days = 365;
-
-                // Formularweise Verarbeitung: Batch selektieren und je Submission Aktionen ausführen.
-                $res = self::process_form($fid, $days, $sub_action, $file_action);
-                $pass += $res['count'];
-                $errors += $res['errors'];
-                $warnings += $res['warnings'];
-
-                // Lock auffrischen nach jedem Formular, um Timeout-Expiration zu verhindern.
+                // Lock auffrischen nach Phase 1.
                 self::refresh_lock();
             }
-            $total += $pass;
-            if((time()-$start) >= self::TIME_LIMIT) {
-                $limit_reached = true;
-                self::debug_log( 'Time limit reached after pass completion', [
-                    'elapsed' => (time() - $start),
-                    'limit' => self::TIME_LIMIT,
-                    'processed_total' => $total,
-                    'processed_this_pass' => $pass,
-                ] );
-                break;
-            }
-            } while($pass > 0);
 
+            // =====================================================================
+            // PHASE 2: Submission-Bereinigung (nur wenn sub_action != 'keep')
+            // =====================================================================
+            if ( 'keep' !== $sub_action ) {
+                self::debug_log( 'Starting submissions cleanup phase' );
+
+                $global = (int) ( $settings['global'] ?? 365 );
+                $forms  = Ninja_Forms()->form()->get_forms();
+
+                // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt.
+                if ( ! is_array( $forms ) || empty( $forms ) ) {
+                    self::debug_log( 'No forms found, skipping submissions cleanup' );
+                } else {
+                    $start = time();
+
+                    // Mehrere Durchläufe: pro Formular Batches abarbeiten.
+                    do {
+                        $pass = 0;
+                        foreach ( $forms as $form ) {
+                            // Zeitlimit-Check: Abbrechen wenn TIME_LIMIT erreicht.
+                            if ( ( time() - $start ) >= self::TIME_LIMIT ) {
+                                $limit_reached = true;
+                                self::debug_log( 'Submissions cleanup time limit reached', [
+                                    'elapsed' => ( time() - $start ),
+                                    'processed_so_far' => $total_subs,
+                                ] );
+                                break;
+                            }
+
+                            // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
+                            if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
+                                continue;
+                            }
+
+                            $fid = $form->get_id();
+                            if ( ! $fid || $fid < 1 ) {
+                                continue;
+                            }
+
+                            // Formular-spezifische Regel laden.
+                            $rule = $settings['forms'][ $fid ] ?? [ 'mode' => 'global' ];
+                            if ( 'never' === ( $rule['mode'] ?? 'global' ) ) {
+                                continue;
+                            }
+
+                            $days = ( 'custom' === ( $rule['mode'] ?? 'global' ) ) ? (int) $rule['days'] : $global;
+                            if ( $days < 1 ) {
+                                $days = 365;
+                            }
+
+                            // Formularweise Verarbeitung: NUR Submissions, keine Uploads.
+                            $res = self::process_form( $fid, $days, $sub_action );
+                            $pass     += $res['count'];
+                            $errors   += $res['errors'];
+                            $warnings += $res['warnings'];
+
+                            // Lock auffrischen nach jedem Formular.
+                            self::refresh_lock();
+                        }
+
+                        $total_subs += $pass;
+
+                        // Zeitlimit-Check nach vollständigem Durchlauf.
+                        if ( ( time() - $start ) >= self::TIME_LIMIT ) {
+                            $limit_reached = true;
+                            break;
+                        }
+
+                    } while ( $pass > 0 );
+                }
+            }
+
+            // =====================================================================
+            // ABSCHLUSS: Status-Nachricht zusammenbauen
+            // =====================================================================
             // Endstatus ableiten: error schlägt warning, warning schlägt success.
             $final_status = 'success';
-            if($errors > 0) $final_status = 'error';
-            elseif($warnings > 0) $final_status = 'warning';
+            if ( $errors > 0 ) {
+                $final_status = 'error';
+            } elseif ( $warnings > 0 ) {
+                $final_status = 'warning';
+            }
 
-            // Abschlussnachricht: bei TIME_LIMIT Hinweis auf Fortsetzung im nächsten Durchlauf.
-            $status_msg = $limit_reached ? "Teilweise ($total verarbeitet). Weiter..." : "Fertig. $total verarbeitet.";
-            if($errors > 0 || $warnings > 0) $status_msg .= " ($errors Fehler, $warnings Warnungen)";
+            // Status-Nachricht: Zeigt beide Werte separat an (Einträge + Dateien).
+            // Das war der ursprüngliche Bug: Nur Submissions wurden angezeigt.
+            //
+            // LOGIK: Zeige nur relevante Teile an:
+            // - Einträge: Nur wenn sub_action != 'keep' (sonst irrelevant)
+            // - Dateien: Nur wenn file_action == 'delete' (sonst irrelevant)
+            $status_parts = [];
+            if ( 'keep' !== $sub_action ) {
+                $status_parts[] = $total_subs . ' Einträge';
+            }
+            if ( 'delete' === $file_action ) {
+                $status_parts[] = $total_files . ' Dateien';
+            }
 
-            NF_AD_Logger::finish_run($run_id, $final_status, $status_msg);
+            $status_summary = implode( ', ', $status_parts );
+            if ( empty( $status_summary ) ) {
+                $status_summary = '0 verarbeitet';
+            }
+
+            $status_msg = $limit_reached
+                ? "Teilweise ({$status_summary}). Weiter..."
+                : "Fertig. {$status_summary}.";
+
+            if ( $errors > 0 || $warnings > 0 ) {
+                $status_msg .= " ({$errors} Fehler, {$warnings} Warnungen)";
+            }
+
+            NF_AD_Logger::finish_run( $run_id, $final_status, $status_msg );
             NF_AD_Logger::cleanup_logs( $settings['log_limit'] ?? 256 );
 
         } catch ( Throwable $e ) {
@@ -356,137 +441,45 @@ class NF_AD_Submissions_Eraser {
 
             NF_AD_Logger::finish_run( $run_id, 'error', $error_msg );
 
-            // WICHTIG: total und limit_reached müssen auch im Error-Fall zurückgegeben werden.
-            // Sonst würde return ['deleted' => 0, 'has_more' => false] die tatsächlich verarbeiteten
-            // Submissions verschleiern.
         } finally {
             // GUARANTEE: Lock wird IMMER freigegeben, egal ob Erfolg oder Fehler.
             // Dies ist die wichtigste Zeile für Production-Stabilität.
             delete_transient( 'nf_ad_cleanup_running' );
         }
 
-        return ['deleted' => $total, 'has_more' => $limit_reached];
+        // Return-Wert: Kombiniert beide Zähler für die AJAX-Response.
+        // Das Modal zeigt "X verarbeitet", was jetzt Submissions + Dateien summiert.
+        return [
+            'deleted'  => $total_subs + $total_files,
+            'has_more' => $limit_reached,
+        ];
     }
 
     // =============================================================================
     // FORM-VERARBEITUNG (BATCH)
     // =============================================================================
 
-    /* --- Selektion, Datei-Cleanup, Submission-Handling --- */
+    /* --- Selektion und Submission-Handling --- */
 
     /**
      * Verarbeitet ein Formular in einem Batch:
      * 1) Submissions anhand des Cutoff-Datums selektieren.
-     * 2) Optional Uploads bereinigen.
-     * 3) Submission löschen, in Trash verschieben oder behalten.
-     * 4) Ergebnis pro Submission im Logger protokollieren.
+     * 2) Submission löschen oder in Trash verschieben.
+     * 3) Ergebnis pro Submission im Logger protokollieren.
      *
-     * @param int    $fid         Formular-ID.
-     * @param int    $days        Cutoff in Tagen.
-     * @param string $sub_action  "keep" | "trash" | "delete".
-     * @param string $file_action "keep" | "delete".
+     * ARCHITEKTUR: Diese Methode kümmert sich NUR um Submissions.
+     * Upload-Bereinigung erfolgt separat über NF_AD_Uploads_Deleter::run_cleanup().
+     * Die Koordination beider Prozesse übernimmt run_cleanup_logic().
+     *
+     * @param int    $fid        Formular-ID.
+     * @param int    $days       Cutoff in Tagen.
+     * @param string $sub_action "trash" | "delete".
      *
      * @return array{count:int,errors:int,warnings:int}
      */
-    private static function process_form( $fid, $days, $sub_action, $file_action ) {
+    private static function process_form( $fid, $days, $sub_action ) {
         // Cutoff-Datum auf Basis der WordPress-Zeitzone berechnen (nicht Server-Zeit).
         $cutoff = self::get_cutoff_datetime( $days );
-
-        // NEUE ARCHITEKTUR: Bulk-Bereinigung von Uploads aus der Ninja Forms Uploads-Tabelle.
-        // Läuft unabhängig von Submissions, basierend auf form_id + cutoff_date.
-        // Batch-Processing mit Zeitlimit, um Timeouts zu vermeiden.
-        // BUGFIX: Pagination implementiert, um Endlosschleifen bei externen Uploads zu vermeiden.
-        $table_files_deleted = 0;
-        $table_file_errors   = 0;
-        if ( 'delete' === $file_action && class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'cleanup_uploads_for_form' ) ) {
-            self::debug_log( 'Bulk upload cleanup started', [
-                'form_id' => $fid,
-                'cutoff' => $cutoff,
-                'batch_limit' => self::BATCH_LIMIT,
-            ] );
-
-            $table_start = time();
-            $last_id = 0;
-
-            /**
-             * Deadlock-Protection: Threshold = 3 Iterationen.
-             *
-             * WARUM 3 und nicht 1?
-             * - Bei >= 1: Zu sensitiv. Legitime DB-Latenzen oder Transaktions-Delays könnten Fehlalarme auslösen.
-             * - Bei >= 2: Immer noch zu niedrig. Edge-Cases wie DB-Replikations-Lag könnten fälschlicherweise triggern.
-             * - Bei >= 3: Ausbalanciert. Gibt genug Toleranz für temporäre DB-Anomalien, erkennt aber echte Deadlocks zuverlässig.
-             * - Bei >= 5: Zu träge. Bei echten Bugs würden 5 unnötige DB-Queries laufen.
-             *
-             * Empirische Tests zeigten: 3 ist der Sweet-Spot für Produktions-Stabilität.
-             */
-            $deadlock_detector = 0;
-
-            do {
-                $prev_id = $last_id;
-                $table_res = NF_AD_Uploads_Deleter::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT, $last_id );
-                $table_files_deleted += (int) ( $table_res['deleted'] ?? 0 );
-                $table_file_errors   += (int) ( $table_res['errors'] ?? 0 );
-
-                $rows = (int) ( $table_res['rows'] ?? 0 );
-
-                // BUGFIX: Sichere Progression - nimm immer das Maximum, nie rückwärts.
-                $returned_id = (int) ( $table_res['last_id'] ?? 0 );
-                $last_id = max( $last_id, $returned_id );
-
-                // BUGFIX: Deadlock-Detection - wenn last_id sich nicht ändert, ist kein Fortschritt möglich.
-                if ( $rows > 0 && $last_id === $prev_id ) {
-                    $deadlock_detector++;
-                    // Nach 3 Versuchen ohne Fortschritt: Abbruch (verhindert Endlosschleife).
-                    if ( $deadlock_detector >= 3 ) {
-                        self::debug_log( 'Deadlock detected in upload cleanup - no ID progression', [
-                            'form_id' => $fid,
-                            'last_id' => $last_id,
-                            'rows' => $rows,
-                        ] );
-                        break;
-                    }
-                } else {
-                    $deadlock_detector = 0; // Reset bei Fortschritt
-                }
-
-                // Lock auffrischen nach jedem Batch, um Timeout-Expiration bei langen Cleanup-Operationen zu verhindern.
-                self::refresh_lock();
-
-                // Abbruch wenn kein voller Batch mehr kam (alle Uploads abgearbeitet) oder Zeitlimit fast erreicht.
-                if ( $rows < self::BATCH_LIMIT ) {
-                    break;
-                }
-
-                if ( ( time() - $table_start ) >= max( 1, ( self::TIME_LIMIT - 3 ) ) ) {
-                    self::debug_log( 'Upload cleanup time limit reached', [
-                        'form_id' => $fid,
-                        'elapsed' => ( time() - $table_start ),
-                        'limit' => self::TIME_LIMIT,
-                        'files_deleted' => $table_files_deleted,
-                        'file_errors' => $table_file_errors,
-                    ] );
-                    break;
-                }
-            } while ( true );
-        }
-
-        // Formular-Level-Logging für die Bulk-Upload-Bereinigung (unabhängig von einzelnen Submissions).
-        if ( ( $table_files_deleted > 0 || $table_file_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
-            $table_stat = ( $table_file_errors > 0 ) ? 'warning' : 'success';
-            $table_msg  = '[FILES][BULK] ' . $table_files_deleted . ' Datei(en) gelöscht (Ninja Forms Uploads Tabelle).';
-            if ( $table_file_errors > 0 ) {
-                $table_msg .= ' [WARNING] ' . $table_file_errors . ' Datei-Fehler.';
-            }
-            // Submission-ID 0 = Form-Level Operation (nicht an einzelne Submission gebunden).
-            NF_AD_Logger::log( (int) $fid, 0, '', $table_stat, $table_msg );
-        }
-
-        // BUGFIX #2: Wenn Submissions behalten werden sollen, gibt es nichts mehr zu tun.
-        // Dateien wurden bereits im Bulk-Teil gelöscht (falls file_action=delete).
-        // Unnötige Log-Einträge und DB-Abfragen vermeiden.
-        if ( $sub_action === 'keep' ) {
-            return [ 'count' => 0, 'errors' => 0, 'warnings' => 0 ];
-        }
 
         $query_args = [
             'post_type'              => 'nf_sub',
@@ -511,13 +504,9 @@ class NF_AD_Submissions_Eraser {
             'ignore_sticky_posts'    => true,
         ];
 
-        // NEUE ARCHITEKTUR: Meta-Query für Upload-Felder ist nicht mehr nötig.
-        // Dateien werden unabhängig von Submissions gelöscht via cleanup_uploads_for_form().
-        // Der Query selektiert nur noch Submissions basierend auf Cutoff-Datum.
-
         // Post-Status Handling:
         // Bei "delete" auch Trash einbeziehen (GDPR/DSGVO: bereits getrashte Submissions müssen bereinigt werden).
-        // Bei "trash"/"keep" Trash ausschließen (Performance, da bereits verarbeitet).
+        // Bei "trash" Trash ausschließen (Performance, da bereits verarbeitet).
         if ( $sub_action === 'delete' ) {
             $query_args['post_status'] = array_keys( get_post_stati() );
         } else {
@@ -534,14 +523,12 @@ class NF_AD_Submissions_Eraser {
             return $result;
         }
 
-        // NEUE ARCHITEKTUR: Datei-Bereinigung erfolgt bereits VOR dem Loop via cleanup_uploads_for_form().
-        // Der Loop fokussiert sich NUR auf Submission-Handling (klare Trennung der Verantwortlichkeiten).
-
+        // Submission-Loop: Fokussiert sich NUR auf Submission-Handling.
         foreach ( $ids as $id ) {
             $stat     = 'success';
             $sub_date = get_post_field( 'post_date', $id );
 
-            // Submission-Handling gemäß sub_action (delete, trash, keep).
+            // Submission-Handling gemäß sub_action (delete oder trash).
             $action_tag = '';
             $msg        = '';
 
@@ -573,13 +560,6 @@ class NF_AD_Submissions_Eraser {
                 } else {
                     $msg = "{$action_tag} Eintrag war bereits im Papierkorb.";
                 }
-
-            } else {
-                // Keep-Modus: Submissions werden behalten.
-                // NEUE ARCHITEKTUR: Dateien wurden bereits via cleanup_uploads_for_form() gelöscht (falls file_action=delete).
-                // Hier loggen wir nur, dass die Submission behalten wurde.
-                $action_tag = '[KEEP]';
-                $msg = "{$action_tag} Eintrag behalten.";
             }
 
             NF_AD_Logger::log( $fid, $id, $sub_date, $stat, $msg );
@@ -591,8 +571,6 @@ class NF_AD_Submissions_Eraser {
             'submissions_processed' => $result['count'],
             'errors' => $result['errors'],
             'warnings' => $result['warnings'],
-            'bulk_files_deleted' => $table_files_deleted,
-            'bulk_file_errors' => $table_file_errors,
         ] );
 
         return $result;

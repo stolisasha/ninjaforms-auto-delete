@@ -15,10 +15,24 @@ if ( ! defined( 'ABSPATH' ) ) {
 class NF_AD_Uploads_Deleter {
 
     // =============================================================================
-    // PUBLIC API
+    // KONSTANTEN
     // =============================================================================
 
-    /* --- Entry-Point: Submission Cleanup --- */
+    /**
+     * Maximale Anzahl an Upload-Zeilen pro Batch.
+     * Identisch mit Submissions_Eraser für konsistentes Verhalten.
+     */
+    const BATCH_LIMIT = 50;
+
+    /**
+     * Maximale Laufzeit pro Durchlauf (Sekunden), um Timeouts zu vermeiden.
+     * Identisch mit Submissions_Eraser für konsistentes Verhalten.
+     */
+    const TIME_LIMIT = 20;
+
+    // =============================================================================
+    // SCHEMA CACHE
+    // =============================================================================
 
     /**
      * Gecachtes Schema der Uploads-Tabelle (Performance-Optimierung).
@@ -383,6 +397,203 @@ class NF_AD_Uploads_Deleter {
 
         return [
             'count' => $count,
+            'limit_reached' => $limit_reached,
+        ];
+    }
+
+    // =============================================================================
+    // BULK CLEANUP (EIGENSTÄNDIGER ENTRY-POINT)
+    // =============================================================================
+
+    /**
+     * Eigenständiger Entry-Point für die Bulk-Bereinigung von Upload-Dateien.
+     *
+     * ARCHITEKTUR: Diese Methode ist der zentrale Entry-Point für Upload-Bereinigung.
+     * Sie ist komplett unabhängig vom Submissions_Eraser und verwaltet:
+     * - Eigenes Logging (Start/Ende des Runs)
+     * - Eigene Zähler (deleted, errors)
+     * - Eigene Zeitlimits
+     *
+     * WICHTIG: Der Submissions_Eraser ruft diese Methode NICHT mehr auf.
+     * Stattdessen werden beide von einem Orchestrator (run_cleanup_logic) koordiniert.
+     *
+     * @param bool $is_cron True bei Cron-Ausführung, false bei manueller Ausführung.
+     *
+     * @return array{deleted:int,errors:int,has_more:bool}
+     */
+    public static function run_cleanup( $is_cron = false ) {
+        $settings = class_exists( 'NF_AD_Dashboard' ) ? NF_AD_Dashboard::get_settings() : array();
+
+        $file_action = $settings['file_handling'] ?? 'keep';
+
+        // Wenn Dateien behalten werden sollen, gibt es nichts zu tun.
+        if ( 'keep' === $file_action ) {
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+        }
+
+        // Defensive: Wenn Ninja Forms nicht geladen ist, abbrechen.
+        if ( ! function_exists( 'Ninja_Forms' ) ) {
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+        }
+
+        $global = (int) ( $settings['global'] ?? 365 );
+        $forms  = Ninja_Forms()->form()->get_forms();
+
+        // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt.
+        if ( ! is_array( $forms ) || empty( $forms ) ) {
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+        }
+
+        $total_deleted = 0;
+        $total_errors  = 0;
+        $start         = time();
+        $limit_reached = false;
+
+        // Iteriere durch alle Formulare und lösche fällige Uploads.
+        foreach ( $forms as $form ) {
+            // Zeitlimit-Check: Abbrechen wenn TIME_LIMIT fast erreicht.
+            if ( ( time() - $start ) >= self::TIME_LIMIT ) {
+                $limit_reached = true;
+                self::debug_log( 'Upload cleanup time limit reached', [
+                    'elapsed' => ( time() - $start ),
+                    'limit' => self::TIME_LIMIT,
+                    'total_deleted' => $total_deleted,
+                ] );
+                break;
+            }
+
+            // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
+            if ( ! is_object( $form ) || ! method_exists( $form, 'get_id' ) ) {
+                continue;
+            }
+
+            $fid = $form->get_id();
+            if ( ! $fid || $fid < 1 ) {
+                continue;
+            }
+
+            // Formular-spezifische Regel laden.
+            $rule = $settings['forms'][ $fid ] ?? array( 'mode' => 'global' );
+            if ( isset( $rule['mode'] ) && 'never' === $rule['mode'] ) {
+                continue;
+            }
+
+            $days = ( isset( $rule['mode'] ) && 'custom' === $rule['mode'] ) ? (int) $rule['days'] : $global;
+            if ( $days < 1 ) {
+                $days = 365;
+            }
+
+            // Cutoff-Datum berechnen (WordPress-Zeitzone).
+            $cutoff_obj = current_datetime()->modify( '-' . max( 1, absint( $days ) ) . ' days' );
+            $cutoff     = $cutoff_obj->format( 'Y-m-d H:i:s' );
+
+            // Formular-Uploads bereinigen mit Batch-Processing.
+            $form_result = self::cleanup_uploads_for_form_batched( $fid, $cutoff, $start );
+
+            $total_deleted += $form_result['deleted'];
+            $total_errors  += $form_result['errors'];
+
+            // Wenn das Formular das Zeitlimit erreicht hat, abbrechen.
+            if ( $form_result['limit_reached'] ) {
+                $limit_reached = true;
+                break;
+            }
+        }
+
+        self::debug_log( 'Bulk upload cleanup completed', [
+            'total_deleted' => $total_deleted,
+            'total_errors' => $total_errors,
+            'limit_reached' => $limit_reached,
+            'elapsed' => ( time() - $start ),
+        ] );
+
+        return [
+            'deleted'  => $total_deleted,
+            'errors'   => $total_errors,
+            'has_more' => $limit_reached,
+        ];
+    }
+
+    /**
+     * Bereinigt Uploads für ein Formular mit Batch-Processing und Zeitlimit.
+     *
+     * INTERN: Wird von run_cleanup() aufgerufen. Verarbeitet alle fälligen Uploads
+     * eines Formulars in Batches, bis keine mehr vorhanden sind oder das Zeitlimit greift.
+     *
+     * @param int    $fid    Formular-ID.
+     * @param string $cutoff Cutoff-Datum im Format 'Y-m-d H:i:s'.
+     * @param int    $start  Startzeitpunkt (Unix-Timestamp) für Zeitlimit-Berechnung.
+     *
+     * @return array{deleted:int,errors:int,limit_reached:bool}
+     */
+    private static function cleanup_uploads_for_form_batched( $fid, $cutoff, $start ) {
+        $total_deleted   = 0;
+        $total_errors    = 0;
+        $limit_reached   = false;
+        $last_id         = 0;
+        $deadlock_detector = 0;
+
+        do {
+            $prev_id = $last_id;
+
+            // Einzelnen Batch verarbeiten.
+            $batch_result = self::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT, $last_id );
+
+            $total_deleted += (int) ( $batch_result['deleted'] ?? 0 );
+            $total_errors  += (int) ( $batch_result['errors'] ?? 0 );
+            $rows          = (int) ( $batch_result['rows'] ?? 0 );
+
+            // Sichere Progression: Immer das Maximum nehmen, nie rückwärts.
+            $returned_id = (int) ( $batch_result['last_id'] ?? 0 );
+            $last_id     = max( $last_id, $returned_id );
+
+            // Deadlock-Detection: Wenn last_id sich nicht ändert, ist kein Fortschritt möglich.
+            if ( $rows > 0 && $last_id === $prev_id ) {
+                $deadlock_detector++;
+                if ( $deadlock_detector >= 3 ) {
+                    self::debug_log( 'Deadlock detected in batched upload cleanup', [
+                        'form_id' => $fid,
+                        'last_id' => $last_id,
+                        'rows' => $rows,
+                    ] );
+                    break;
+                }
+            } else {
+                $deadlock_detector = 0;
+            }
+
+            // Abbruch wenn kein voller Batch mehr kam (alle Uploads abgearbeitet).
+            if ( $rows < self::BATCH_LIMIT ) {
+                break;
+            }
+
+            // Zeitlimit-Check: Abbrechen wenn TIME_LIMIT fast erreicht (3 Sekunden Puffer).
+            if ( ( time() - $start ) >= ( self::TIME_LIMIT - 3 ) ) {
+                $limit_reached = true;
+                self::debug_log( 'Upload batch time limit reached', [
+                    'form_id' => $fid,
+                    'elapsed' => ( time() - $start ),
+                    'total_deleted' => $total_deleted,
+                ] );
+                break;
+            }
+
+        } while ( true );
+
+        // Log-Eintrag für dieses Formular (nur wenn etwas passiert ist).
+        if ( ( $total_deleted > 0 || $total_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
+            $status = ( $total_errors > 0 ) ? 'warning' : 'success';
+            $msg    = '[FILES] ' . $total_deleted . ' Datei(en) gelöscht.';
+            if ( $total_errors > 0 ) {
+                $msg .= ' [WARNING] ' . $total_errors . ' Fehler.';
+            }
+            // Submission-ID 0 = Form-Level Operation (nicht an einzelne Submission gebunden).
+            NF_AD_Logger::log( (int) $fid, 0, '', $status, $msg );
+        }
+
+        return [
+            'deleted'       => $total_deleted,
+            'errors'        => $total_errors,
             'limit_reached' => $limit_reached,
         ];
     }
