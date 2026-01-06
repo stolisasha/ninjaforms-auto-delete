@@ -418,7 +418,7 @@ class NF_AD_Dashboard {
                                 li.removeClass('loading').addClass('done');
                                 li.find('.dashicons').removeClass('dashicons-update').addClass('dashicons-yes');
                                 if(res.success) {
-                                    li.html('<span class="dashicons dashicons-yes"></span> Batch ' + batchCounter + ': ' + res.data.deleted + ' entfernt.');
+                                    li.html('<span class="dashicons dashicons-yes"></span> Batch ' + batchCounter + ': ' + res.data.deleted + ' Löschungen.');
                                     if(res.data.has_more) { batchCounter++; runBatch(); } 
                                     else { $('#batch-log').append('<li style="color:green; font-weight:bold;">Fertig!</li>'); $('#close-modal').show(); }
                                 } else { li.html('<span class="dashicons dashicons-warning"></span> ' + res.data); $('#close-modal').show(); }
