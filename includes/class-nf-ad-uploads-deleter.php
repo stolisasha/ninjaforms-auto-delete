@@ -520,6 +520,9 @@ class NF_AD_Uploads_Deleter {
      * INTERN: Wird von run_cleanup() aufgerufen. Verarbeitet alle fälligen Uploads
      * eines Formulars in Batches, bis keine mehr vorhanden sind oder das Zeitlimit greift.
      *
+     * LOGGING: Einzelne Log-Einträge pro gelöschter Datei werden direkt in
+     * cleanup_uploads_for_form() geschrieben (nicht hier gebatcht).
+     *
      * @param int    $fid    Formular-ID.
      * @param string $cutoff Cutoff-Datum im Format 'Y-m-d H:i:s'.
      * @param int    $start  Startzeitpunkt (Unix-Timestamp) für Zeitlimit-Berechnung.
@@ -580,16 +583,8 @@ class NF_AD_Uploads_Deleter {
 
         } while ( true );
 
-        // Log-Eintrag für dieses Formular (nur wenn etwas passiert ist).
-        if ( ( $total_deleted > 0 || $total_errors > 0 ) && class_exists( 'NF_AD_Logger' ) ) {
-            $status = ( $total_errors > 0 ) ? 'warning' : 'success';
-            $msg    = '[FILES] ' . $total_deleted . ' Datei(en) gelöscht.';
-            if ( $total_errors > 0 ) {
-                $msg .= ' [WARNING] ' . $total_errors . ' Fehler.';
-            }
-            // Submission-ID 0 = Form-Level Operation (nicht an einzelne Submission gebunden).
-            NF_AD_Logger::log( (int) $fid, 0, '', $status, $msg );
-        }
+        // HINWEIS: Einzelne Log-Einträge werden direkt in cleanup_uploads_for_form() geschrieben.
+        // Hier kein Sammel-Log mehr, da jede Datei einzeln protokolliert wird.
 
         return [
             'deleted'       => $total_deleted,
@@ -1042,10 +1037,11 @@ class NF_AD_Uploads_Deleter {
             }
         }
 
-        // Lade Kandidaten-Zeilen (id + data) für dieses Formular, die älter als Cutoff sind.
+        // Lade Kandidaten-Zeilen (id + data + date) für dieses Formular, die älter als Cutoff sind.
         // BUGFIX: Pagination via min_id um Endlosschleifen bei übersprungenen Dateien zu vermeiden.
         // BUGFIX: Verwende $id_col statt hardcoded "id" für Kompatibilität.
-        $sql  = "SELECT {$id_col}, {$data_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} AND {$id_col} > %d ORDER BY {$id_col} ASC LIMIT %d";
+        // NEU: date_col wird mitgeladen für das Log ("Eintrag vom" = Datei-Erstellungsdatum).
+        $sql  = "SELECT {$id_col}, {$data_col}, {$date_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} AND {$id_col} > %d ORDER BY {$id_col} ASC LIMIT %d";
         $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $min_id, $limit ) );
         $rows = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A );
 
@@ -1059,6 +1055,15 @@ class NF_AD_Uploads_Deleter {
             // BUGFIX: Verwende $id_col statt hardcoded "id".
             $row_id = isset( $row[ $id_col ] ) ? absint( $row[ $id_col ] ) : 0;
             $raw    = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
+
+            // Datei-Datum für Log extrahieren ("Eintrag vom").
+            // Bei INT-Timestamp in DATETIME konvertieren, sonst direkt verwenden.
+            $row_date_raw = isset( $row[ $date_col ] ) ? $row[ $date_col ] : '';
+            if ( $date_is_int && is_numeric( $row_date_raw ) && (int) $row_date_raw > 0 ) {
+                $row_date = wp_date( 'Y-m-d H:i:s', (int) $row_date_raw );
+            } else {
+                $row_date = is_string( $row_date_raw ) ? $row_date_raw : '';
+            }
 
             // BUGFIX: Tracke die höchste ID für Pagination - MUSS immer gesetzt werden für Fortschritt.
             if ( $row_id > $stats['last_id'] ) {
@@ -1106,10 +1111,23 @@ class NF_AD_Uploads_Deleter {
                     continue; // Nächste Zeile, DB-Eintrag bleibt erhalten
                 }
 
+                // Jede Datei einzeln löschen und loggen.
                 foreach ( $parsed as $ref ) {
                     $res = self::delete_file_reference( $ref );
                     $del_stats['deleted'] += $res['deleted'];
                     $del_stats['errors']  += $res['errors'];
+
+                    // EINZELNER LOG-EINTRAG pro erfolgreich gelöschter Datei.
+                    if ( $res['deleted'] > 0 && class_exists( 'NF_AD_Logger' ) ) {
+                        $file_name = self::extract_file_name_from_reference( $ref );
+                        NF_AD_Logger::log(
+                            (int) $fid,
+                            0, // Submission-ID 0 = nicht an Submission gebunden
+                            $row_date, // Datei-Erstellungsdatum als "Eintrag vom"
+                            'success',
+                            '[FILE] ' . $file_name
+                        );
+                    }
                 }
             } else {
                 // Einzelne Referenz: Prüfe ob lokal vorhanden.
@@ -1124,6 +1142,18 @@ class NF_AD_Uploads_Deleter {
                 $res = self::delete_file_reference( $parsed );
                 $del_stats['deleted'] += $res['deleted'];
                 $del_stats['errors']  += $res['errors'];
+
+                // EINZELNER LOG-EINTRAG pro erfolgreich gelöschter Datei.
+                if ( $res['deleted'] > 0 && class_exists( 'NF_AD_Logger' ) ) {
+                    $file_name = self::extract_file_name_from_reference( $parsed );
+                    NF_AD_Logger::log(
+                        (int) $fid,
+                        0, // Submission-ID 0 = nicht an Submission gebunden
+                        $row_date, // Datei-Erstellungsdatum als "Eintrag vom"
+                        'success',
+                        '[FILE] ' . $file_name
+                    );
+                }
             }
 
             $stats['deleted'] += $del_stats['deleted'];
@@ -1299,6 +1329,75 @@ class NF_AD_Uploads_Deleter {
         }
         return '';
     }
+
+    /**
+     * Extrahiert den Dateinamen aus einer Datei-Referenz für das Log.
+     *
+     * Unterstützt alle gängigen Referenz-Formate:
+     * - Array mit file_name, file_path, path, file_url, url
+     * - String (Pfad oder URL)
+     * - Attachment-ID (lädt Dateiname aus Media Library)
+     *
+     * @param mixed $ref Datei-Referenz.
+     *
+     * @return string Dateiname (oder "Unbekannte Datei" als Fallback).
+     */
+    private static function extract_file_name_from_reference( $ref ) {
+        // Array: Verschiedene Felder prüfen.
+        if ( is_array( $ref ) ) {
+            // Direkter file_name ist am besten.
+            if ( isset( $ref['file_name'] ) && is_string( $ref['file_name'] ) && '' !== $ref['file_name'] ) {
+                return basename( $ref['file_name'] );
+            }
+
+            // Aus Pfad extrahieren.
+            if ( isset( $ref['file_path'] ) && is_string( $ref['file_path'] ) && '' !== $ref['file_path'] ) {
+                return basename( $ref['file_path'] );
+            }
+            if ( isset( $ref['path'] ) && is_string( $ref['path'] ) && '' !== $ref['path'] ) {
+                return basename( $ref['path'] );
+            }
+
+            // Aus URL extrahieren (ohne Query-String).
+            if ( isset( $ref['file_url'] ) && is_string( $ref['file_url'] ) && '' !== $ref['file_url'] ) {
+                return basename( strtok( $ref['file_url'], '?' ) );
+            }
+            if ( isset( $ref['url'] ) && is_string( $ref['url'] ) && '' !== $ref['url'] ) {
+                return basename( strtok( $ref['url'], '?' ) );
+            }
+
+            // Attachment-ID: Aus Media Library laden.
+            if ( isset( $ref['attachment_id'] ) && is_numeric( $ref['attachment_id'] ) ) {
+                $file = get_attached_file( (int) $ref['attachment_id'] );
+                if ( $file ) {
+                    return basename( $file );
+                }
+            }
+
+            return 'Unbekannte Datei';
+        }
+
+        // Attachment-ID (numerisch).
+        if ( is_numeric( $ref ) ) {
+            $file = get_attached_file( (int) $ref );
+            if ( $file ) {
+                return basename( $file );
+            }
+            return 'Attachment #' . (int) $ref;
+        }
+
+        // String: Pfad oder URL.
+        if ( is_string( $ref ) && '' !== $ref ) {
+            // URL: Query-String entfernen.
+            if ( false !== strpos( $ref, 'http' ) ) {
+                return basename( strtok( $ref, '?' ) );
+            }
+            return basename( $ref );
+        }
+
+        return 'Unbekannte Datei';
+    }
+
     /**
      * Sichere Deserialisierung von Daten OHNE Objekt-Instanziierung.
      *
