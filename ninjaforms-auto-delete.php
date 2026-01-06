@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Ninja Forms - Auto Delete
  * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen. 
- * Version: 2.2.1
+ * Version: 2.2.2
  * Author: Alex Schlair
  * Author URI: https://www.pronto-media.at
  * Text Domain: nf-auto-delete
@@ -90,6 +90,7 @@ function nf_ad_init() {
         add_action( 'admin_menu', [ 'NF_AD_Dashboard', 'register_menu' ] );
         add_action( 'wp_ajax_nf_ad_retry_delete', [ 'NF_AD_Dashboard', 'ajax_retry_delete' ] );
         add_action( 'wp_ajax_nf_ad_clear_logs', [ 'NF_AD_Dashboard', 'ajax_clear_logs' ] );
+        add_action( 'wp_ajax_nf_ad_clear_runs', [ 'NF_AD_Dashboard', 'ajax_clear_runs' ] );
         add_action( 'wp_ajax_nf_ad_force_cleanup', [ 'NF_AD_Dashboard', 'ajax_force_cleanup' ] );
         add_action( 'wp_ajax_nf_ad_calculate', [ 'NF_AD_Dashboard', 'ajax_calculate' ] );
     }

@@ -382,17 +382,38 @@ class NF_AD_Logger {
     /**
      * Löscht alle Logs und Cron-Run-Einträge (TRUNCATE).
      *
+     * @deprecated Seit v2.2.1 - Nutze truncate_logs() oder truncate_runs() für gezielte Löschung.
+     *
      * @return void
      */
     public static function truncate() {
+        self::truncate_logs();
+        self::truncate_runs();
+    }
+
+    /**
+     * Löscht nur die Löschungs-Logs (nf_ad_logs Tabelle).
+     *
+     * @return void
+     */
+    public static function truncate_logs() {
         global $wpdb;
         $logs_table = $wpdb->prefix . self::TABLE_LOGS;
-        $runs_table = $wpdb->prefix . self::TABLE_RUNS;
 
         $logs_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $logs_table ) );
         if ( ! empty( $logs_exists ) ) {
             $wpdb->query( "TRUNCATE TABLE $logs_table" );
         }
+    }
+
+    /**
+     * Löscht nur die Ausführungs-Logs (nf_ad_cron_runs Tabelle).
+     *
+     * @return void
+     */
+    public static function truncate_runs() {
+        global $wpdb;
+        $runs_table = $wpdb->prefix . self::TABLE_RUNS;
 
         $runs_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $runs_table ) );
         if ( ! empty( $runs_exists ) ) {

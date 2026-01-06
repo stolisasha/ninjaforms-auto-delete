@@ -1125,7 +1125,7 @@ class NF_AD_Uploads_Deleter {
                             0, // Submission-ID 0 = nicht an Submission gebunden
                             $row_date, // Datei-Erstellungsdatum als "Eintrag vom"
                             'success',
-                            '[FILE] ' . $file_name
+                            '[DELETE] ' . $file_name
                         );
                     }
                 }
@@ -1151,7 +1151,7 @@ class NF_AD_Uploads_Deleter {
                         0, // Submission-ID 0 = nicht an Submission gebunden
                         $row_date, // Datei-Erstellungsdatum als "Eintrag vom"
                         'success',
-                        '[FILE] ' . $file_name
+                        '[DELETE] ' . $file_name
                     );
                 }
             }

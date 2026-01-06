@@ -130,28 +130,36 @@ class NF_AD_Submissions_Eraser {
      *
      * WICHTIG: Diese Methode zählt NUR Submissions. Für Upload-Dateien siehe NF_AD_Uploads_Deleter::calculate_dry_run().
      *
-     * @return int
+     * SEIT v2.2.1: Gibt ein Array mit detaillierter Aufschlüsselung zurück:
+     * - total: Gesamtzahl der betroffenen Submissions
+     * - active: Submissions die noch aktiv sind (nicht im Papierkorb)
+     * - trashed: Submissions die bereits im Papierkorb sind
+     *
+     * @return array{total:int,active:int,trashed:int}
      */
     public static function calculate_dry_run() {
         $settings = NF_AD_Dashboard::get_settings();
 
-        // Defensive: If Ninja Forms is not loaded, return 0.
+        $result = [ 'total' => 0, 'active' => 0, 'trashed' => 0 ];
+
+        // Defensive: If Ninja Forms is not loaded, return empty result.
         if ( ! function_exists( 'Ninja_Forms' ) ) {
-            return 0;
+            return $result;
         }
 
-        // Bei "delete" müssen auch bereits im Papierkorb befindliche Submissions berücksichtigt werden (GDPR/DSGVO).
+        // Bei "keep" werden keine Submissions verarbeitet - direkt 0 zurückgeben.
         $sub_action = $settings['sub_handling'] ?? 'keep';
+        if ( 'keep' === $sub_action ) {
+            return $result;
+        }
 
         $global = (int) ( $settings['global'] ?? 365 );
         $forms  = Ninja_Forms()->form()->get_forms();
 
         // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt (Edge-Case: DB-Fehler, Partial Plugin Load).
         if ( ! is_array( $forms ) || empty( $forms ) ) {
-            return 0;
+            return $result;
         }
-
-        $total_count = 0;
 
         foreach ( $forms as $form ) {
             // DEFENSIVE: Prüfe ob Form-Objekt und ID valide sind.
@@ -176,8 +184,8 @@ class NF_AD_Submissions_Eraser {
 
             $cutoff = self::get_cutoff_datetime( $days );
 
-            // Query-Parameter für Submissions.
-            $args = array(
+            // Basis-Query-Parameter für Submissions.
+            $base_args = array(
                 'post_type'              => 'nf_sub',
                 'posts_per_page'         => 1,
                 'fields'                 => 'ids',
@@ -200,18 +208,29 @@ class NF_AD_Submissions_Eraser {
                         'compare' => '=',
                     ),
                 ),
-                'post_status'            => ( 'delete' === $sub_action )
-                    ? array_keys( get_post_stati() )
-                    : array_values( array_diff( array_keys( get_post_stati() ), array( 'trash' ) ) ),
             );
 
-            // Zähle Submissions für dieses Formular.
-            $q = new WP_Query( $args );
-            $total_count += (int) $q->found_posts;
+            // Query 1: Aktive Submissions (nicht im Papierkorb).
+            $args_active = $base_args;
+            $args_active['post_status'] = array_values( array_diff( array_keys( get_post_stati() ), array( 'trash' ) ) );
+            $q_active = new WP_Query( $args_active );
+            $result['active'] += (int) $q_active->found_posts;
             wp_reset_postdata();
+
+            // Query 2: Submissions im Papierkorb (nur bei sub_action = 'delete').
+            if ( 'delete' === $sub_action ) {
+                $args_trashed = $base_args;
+                $args_trashed['post_status'] = array( 'trash' );
+                $q_trashed = new WP_Query( $args_trashed );
+                $result['trashed'] += (int) $q_trashed->found_posts;
+                wp_reset_postdata();
+            }
         }
 
-        return $total_count;
+        // Total berechnen.
+        $result['total'] = $result['active'] + $result['trashed'];
+
+        return $result;
     }
 
     // =============================================================================

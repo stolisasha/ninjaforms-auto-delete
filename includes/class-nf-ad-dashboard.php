@@ -311,7 +311,13 @@ class NF_AD_Dashboard {
                                         if (res.data.limit_reached) {
                                             count_display = count_display + '+';
                                         }
-                                        $('#calc-output').text('Simulation Ergebnis: ' + count_display + ' ' + txt + ' sind älter als die Frist.');
+
+                                        // NEU: Bei Submissions auch Trash-Info anzeigen (seit v2.2.1).
+                                        var output = 'Simulation Ergebnis: ' + count_display + ' ' + txt + ' sind älter als die Frist.';
+                                        if (res.data.type === 'subs' && res.data.trashed > 0) {
+                                            output += ' (' + res.data.trashed + ' davon im Papierkorb)';
+                                        }
+                                        $('#calc-output').text(output);
                                     } else if (res && res.data) {
                                         // WP/AJAX returned a structured error.
                                         $('#calc-output').text('Fehler: ' + res.data);
@@ -412,7 +418,7 @@ class NF_AD_Dashboard {
                                 li.removeClass('loading').addClass('done');
                                 li.find('.dashicons').removeClass('dashicons-update').addClass('dashicons-yes');
                                 if(res.success) {
-                                    li.html('<span class="dashicons dashicons-yes"></span> Batch ' + batchCounter + ': ' + res.data.deleted + ' verarbeitet.');
+                                    li.html('<span class="dashicons dashicons-yes"></span> Batch ' + batchCounter + ': ' + res.data.deleted + ' entfernt.');
                                     if(res.data.has_more) { batchCounter++; runBatch(); } 
                                     else { $('#batch-log').append('<li style="color:green; font-weight:bold;">Fertig!</li>'); $('#close-modal').show(); }
                                 } else { li.html('<span class="dashicons dashicons-warning"></span> ' + res.data); $('#close-modal').show(); }
@@ -459,7 +465,7 @@ class NF_AD_Dashboard {
         ?>
         <div class="nf-ad-headline-row"><h2>Ausführungen (Cron Monitor)</h2></div>
         <div class="tablenav top">
-            <div class="alignleft actions"><button type="button" class="button nf-ad-clear-all-logs">Log leeren</button></div>
+            <div class="alignleft actions"><button type="button" class="button nf-ad-clear-runs">Log leeren</button></div>
             <div class="tablenav-pages"><span class="displaying-num"><?php echo esc_html( $total_runs ); ?> Einträge</span>
                 <?php if($total_pages_cron > 1): ?>
                     <span class="pagination-links">
@@ -533,7 +539,7 @@ class NF_AD_Dashboard {
         <hr>
         <div class="nf-ad-headline-row" style="margin-bottom: 5px;"><h2>Löschungen</h2></div>
         <div class="tablenav top">
-            <div class="alignleft actions"><button type="button" class="button action nf-ad-clear-all-logs">Log leeren</button></div>
+            <div class="alignleft actions"><button type="button" class="button action nf-ad-clear-logs">Log leeren</button></div>
             <div class="tablenav-pages"><span class="displaying-num"><?php echo esc_html( $total_logs ); ?> Einträge</span>
                 <?php if($total_pages > 1): ?>
                     <span class="pagination-links">
@@ -595,11 +601,12 @@ class NF_AD_Dashboard {
                             $msg = esc_html( $log['message'] );
                             // Hervorhebung bekannter Status-Tags (sicher, da zuvor escaped wird).
                             $replacements = [
-                                '[CRON]'   => '<strong style="color:#2563eb">[CRON]</strong>',
-                                '[MANUAL]' => '<strong style="color:#86198f">[MANUAL]</strong>',
+                                '[CRON]'    => '<strong style="color:#2563eb">[CRON]</strong>',
+                                '[MANUAL]'  => '<strong style="color:#86198f">[MANUAL]</strong>',
                                 '[TRASH]'   => '<strong style="color:#d97706">[TRASH]</strong>',
                                 '[DELETE]'  => '<strong style="color:#dc2626">[DELETE]</strong>',
                                 '[FILES]'   => '<strong style="color:#2563eb">[FILES]</strong>',
+                                '[FILE]'    => '<strong style="color:#dc2626">[DELETE]</strong>',
                                 '[WARNING]' => '<strong style="color:#b45309">[WARNING]</strong>',
                                 '[SKIP]'    => '<strong style="color:#6b7280">[SKIP]</strong>',
                             ];
@@ -611,10 +618,19 @@ class NF_AD_Dashboard {
                 <?php endforeach; endif; ?>
             </tbody>
         </table>
-        <script>jQuery(document).ready(function($){ 
-            $('.nf-ad-clear-all-logs').click(function(){ 
-                if(confirm('Sicher?')){ $.post(ajaxurl,{action:'nf_ad_clear_logs', security: NF_AD_Config.nonce},function(){ location.reload(); }); } 
-            }); 
+        <script>jQuery(document).ready(function($){
+            // Löschungen leeren (nur nf_ad_logs Tabelle)
+            $('.nf-ad-clear-logs').click(function(){
+                if(confirm('Alle Löschungs-Einträge löschen?')){
+                    $.post(ajaxurl,{action:'nf_ad_clear_logs', security: NF_AD_Config.nonce},function(){ location.reload(); });
+                }
+            });
+            // Ausführungen leeren (nur nf_ad_cron_runs Tabelle)
+            $('.nf-ad-clear-runs').click(function(){
+                if(confirm('Alle Ausführungs-Einträge löschen?')){
+                    $.post(ajaxurl,{action:'nf_ad_clear_runs', security: NF_AD_Config.nonce},function(){ location.reload(); });
+                }
+            });
         });</script>
         <?php
     }
@@ -750,7 +766,7 @@ class NF_AD_Dashboard {
     }
 
     /**
-     * AJAX: Leert alle Logs.
+     * AJAX: Leert nur die Löschungs-Logs (nf_ad_logs Tabelle).
      *
      * @return void
      */
@@ -759,7 +775,21 @@ class NF_AD_Dashboard {
         if ( ! current_user_can( 'manage_options' ) ) {
             wp_send_json_error( 'Forbidden' );
         }
-        NF_AD_Logger::truncate();
+        NF_AD_Logger::truncate_logs();
+        wp_send_json_success();
+    }
+
+    /**
+     * AJAX: Leert nur die Ausführungs-Logs (nf_ad_cron_runs Tabelle).
+     *
+     * @return void
+     */
+    public static function ajax_clear_runs() {
+        check_ajax_referer( 'nf_ad_security', 'security' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+        NF_AD_Logger::truncate_runs();
         wp_send_json_success();
     }
 
@@ -770,8 +800,15 @@ class NF_AD_Dashboard {
      * - "subs": NF_AD_Submissions_Eraser::calculate_dry_run()
      * - "files": NF_AD_Uploads_Deleter::calculate_dry_run()
      *
-     * Return-Format (seit v2.1): array{count:int, limit_reached:bool}
-     * - count: Anzahl der gefundenen Einträge/Uploads
+     * Return-Format (seit v2.2.1):
+     * Für Submissions:
+     * - count: Gesamtzahl (active + trashed)
+     * - active: Aktive Submissions (nicht im Papierkorb)
+     * - trashed: Submissions im Papierkorb
+     * - limit_reached: true, wenn Performance-Limit erreicht wurde
+     *
+     * Für Files:
+     * - count: Anzahl der gefundenen Uploads
      * - limit_reached: true, wenn Performance-Limit (5.000) erreicht wurde
      *
      * @return void
@@ -791,23 +828,34 @@ class NF_AD_Dashboard {
                 $result = class_exists( 'NF_AD_Uploads_Deleter' ) && method_exists( 'NF_AD_Uploads_Deleter', 'calculate_dry_run' )
                     ? NF_AD_Uploads_Deleter::calculate_dry_run()
                     : [ 'count' => 0, 'limit_reached' => false ];
+
+                // DEFENSIVE: Fallback für Legacy-Return (falls Methode noch int zurückgibt).
+                if ( is_int( $result ) ) {
+                    $result = [ 'count' => $result, 'limit_reached' => false ];
+                }
+
+                wp_send_json_success( [
+                    'count'         => (int) ( $result['count'] ?? 0 ),
+                    'limit_reached' => (bool) ( $result['limit_reached'] ?? false ),
+                    'type'          => $type,
+                ] );
             } else {
+                // Submissions: Neues Format mit active/trashed Unterscheidung.
                 $result = NF_AD_Submissions_Eraser::calculate_dry_run();
+
+                // DEFENSIVE: Fallback für Legacy-Return (falls Methode noch int zurückgibt).
+                if ( is_int( $result ) ) {
+                    $result = [ 'total' => $result, 'active' => $result, 'trashed' => 0 ];
+                }
+
+                wp_send_json_success( [
+                    'count'         => (int) ( $result['total'] ?? 0 ),
+                    'active'        => (int) ( $result['active'] ?? 0 ),
+                    'trashed'       => (int) ( $result['trashed'] ?? 0 ),
+                    'limit_reached' => false,
+                    'type'          => $type,
+                ] );
             }
-
-            // DEFENSIVE: Fallback für Legacy-Return (falls Methode noch int zurückgibt).
-            if ( is_int( $result ) ) {
-                $result = [ 'count' => $result, 'limit_reached' => false ];
-            }
-
-            $count = (int) ( $result['count'] ?? 0 );
-            $limit_reached = (bool) ( $result['limit_reached'] ?? false );
-
-            wp_send_json_success( [
-                'count'         => $count,
-                'limit_reached' => $limit_reached,
-                'type'          => $type,
-            ] );
         } catch ( Throwable $e ) {
             // Log error for debugging (WordPress error_log).
             error_log( 'NF Auto Delete - Dry run failed: ' . $e->getMessage() );
