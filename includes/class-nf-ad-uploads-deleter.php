@@ -270,6 +270,16 @@ class NF_AD_Uploads_Deleter {
         // Uploads werden unabhängig von Submissions gelöscht (klare Trennung der Verantwortlichkeiten).
 
         if ( ! $data_col || ! $date_col || ! $form_col || ! $id_col ) {
+            // DEBUG-LOGGING (Code-Audit Fix): Logge welche Spalte fehlt für Troubleshooting.
+            self::debug_log( 'Schema detection failed in dry-run', [
+                'table' => $uploads_table,
+                'columns_found' => $uploads_columns,
+                'data_col' => $data_col,
+                'date_col' => $date_col,
+                'form_col' => $form_col,
+                'id_col' => $id_col,
+                'form_id' => $fid,
+            ] );
             // BUGFIX: Richtige Return-Struktur (array statt int).
             return [ 'count' => 0, 'limit_reached' => false ];
         }
@@ -328,7 +338,8 @@ class NF_AD_Uploads_Deleter {
                 }
 
                 $serialized_data = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
-                $upload_data = maybe_unserialize( $serialized_data );
+                // SICHERHEIT: safe_unserialize() statt maybe_unserialize() (POI-Schutz).
+                $upload_data = self::safe_unserialize( $serialized_data );
 
                 if ( ! is_array( $upload_data ) ) {
                     continue;
@@ -487,7 +498,8 @@ class NF_AD_Uploads_Deleter {
 
                 if ( ! empty( $rows ) ) {
                     foreach ( $rows as $raw ) {
-                        $parsed = maybe_unserialize( $raw );
+                        // SICHERHEIT: safe_unserialize() statt maybe_unserialize() (POI-Schutz).
+                        $parsed = self::safe_unserialize( $raw );
                         if ( empty( $parsed ) || ! is_array( $parsed ) ) {
                             continue;
                         }
@@ -510,7 +522,8 @@ class NF_AD_Uploads_Deleter {
                     continue;
                 }
 
-                $val = maybe_unserialize( $raw );
+                // SICHERHEIT: safe_unserialize() statt maybe_unserialize() (POI-Schutz).
+                $val = self::safe_unserialize( $raw );
 
                 // JSON-Decode wenn nötig.
                 if ( is_string( $val ) ) {
@@ -703,7 +716,8 @@ class NF_AD_Uploads_Deleter {
             }
 
             $raw_val = get_post_meta( $sid, '_field_' . $f->get_id(), true );
-            $val = maybe_unserialize( $raw_val );
+            // SICHERHEIT: safe_unserialize() statt maybe_unserialize() (POI-Schutz).
+            $val = self::safe_unserialize( $raw_val );
 
             // JSON-Strings erkennen und decodieren (einige Setups speichern Upload-Meta als JSON).
             if (
@@ -785,6 +799,16 @@ class NF_AD_Uploads_Deleter {
 
         // BUGFIX: Ohne ID-Spalte ist keine Pagination möglich.
         if ( ! $data_col || ! $date_col || ! $form_col || ! $id_col ) {
+            // DEBUG-LOGGING (Code-Audit Fix): Logge welche Spalte fehlt für Troubleshooting.
+            self::debug_log( 'Schema detection failed for uploads table', [
+                'table' => $uploads_table,
+                'columns_found' => $uploads_columns,
+                'data_col' => $data_col,
+                'date_col' => $date_col,
+                'form_col' => $form_col,
+                'id_col' => $id_col,
+                'form_id' => $fid,
+            ] );
             $stats['errors']++;
             return $stats;
         }
@@ -845,13 +869,47 @@ class NF_AD_Uploads_Deleter {
 
             $del_stats = array( 'deleted' => 0, 'errors' => 0 );
 
+            // KRITISCH (Code-Audit Fix): Prüfe ob Dateien auf lokalem Server existieren BEVOR gelöscht wird.
+            // Verhindert Datenverlust bei externem Storage (S3, OneDrive, etc.):
+            // - Wenn Datei NICHT lokal existiert (weil auf S3/Cloud), wird DB-Eintrag NICHT gelöscht
+            // - Die Cloud-Referenz bleibt erhalten für manuelles Cleanup oder offizielle Cloud-Integration
+            // - Dry-Run und echter Lauf nutzen jetzt EXAKT dieselbe Logik (Konsistenz)
             if ( is_array( $parsed ) ) {
+                // Bei Arrays: Prüfe ob MINDESTENS EINE Datei lokal existiert.
+                // Nur dann löschen - sonst ist das ein externes Storage Szenario.
+                $has_local_file = false;
+                foreach ( $parsed as $ref ) {
+                    if ( self::file_reference_exists_locally( $ref ) ) {
+                        $has_local_file = true;
+                        break;
+                    }
+                }
+
+                // Wenn KEINE lokale Datei existiert: Überspringe KOMPLETT (DB-Eintrag behalten).
+                // Das schützt vor Datenverlust bei S3/OneDrive/etc.
+                if ( ! $has_local_file ) {
+                    self::debug_log( 'Skipping external storage upload (no local files)', [
+                        'row_id' => $row_id,
+                        'form_id' => $fid,
+                    ] );
+                    continue; // Nächste Zeile, DB-Eintrag bleibt erhalten
+                }
+
                 foreach ( $parsed as $ref ) {
                     $res = self::delete_file_reference( $ref );
                     $del_stats['deleted'] += $res['deleted'];
                     $del_stats['errors']  += $res['errors'];
                 }
             } else {
+                // Einzelne Referenz: Prüfe ob lokal vorhanden.
+                if ( ! self::file_reference_exists_locally( $parsed ) ) {
+                    self::debug_log( 'Skipping external storage upload (no local file)', [
+                        'row_id' => $row_id,
+                        'form_id' => $fid,
+                    ] );
+                    continue; // Nächste Zeile, DB-Eintrag bleibt erhalten
+                }
+
                 $res = self::delete_file_reference( $parsed );
                 $del_stats['deleted'] += $res['deleted'];
                 $del_stats['errors']  += $res['errors'];
@@ -910,7 +968,15 @@ class NF_AD_Uploads_Deleter {
     /* --- Rekursives Löschen (Datei oder Array) --- */
 
     /**
-     * Löscht eine Datei oder eine Liste von Dateien (rekursiv).
+     * Maximale Rekursionstiefe für del() (Schutz vor Stack Overflow).
+     *
+     * SICHERHEIT (Code-Audit Fix): Verhindert Endlosrekursion bei fehlerhaften Daten.
+     * Upload-Daten sollten maximal 3-4 Level tief sein. 10 Level bieten großzügigen Puffer.
+     */
+    const MAX_RECURSION_DEPTH = 10;
+
+    /**
+     * Löscht eine Datei oder eine Liste von Dateien (rekursiv mit Tiefenlimit).
      *
      * Unterstützte Eingaben:
      * - Absoluter Pfad
@@ -920,18 +986,30 @@ class NF_AD_Uploads_Deleter {
      * Sicherheitschecks:
      * - Keine Symlinks
      * - Nur innerhalb des WordPress Upload-Verzeichnisses
+     * - Maximale Rekursionstiefe (verhindert Stack Overflow)
      *
-     * @param mixed $val Dateireferenz.
+     * @param mixed $val   Dateireferenz.
+     * @param int   $depth Aktuelle Rekursionstiefe (intern, nicht manuell setzen).
      *
      * @return array{deleted:int,errors:int}
      */
-    private static function del( $val ) {
+    private static function del( $val, $depth = 0 ) {
         $stats = [ 'deleted' => 0, 'errors' => 0 ];
 
-        // Mehrfach-Uploads: Arrays rekursiv abarbeiten.
+        // SICHERHEIT: Rekursionstiefe prüfen (verhindert Stack Overflow bei fehlerhaften Daten).
+        if ( $depth > self::MAX_RECURSION_DEPTH ) {
+            self::debug_log( 'Max recursion depth exceeded in del()', [
+                'depth' => $depth,
+                'max' => self::MAX_RECURSION_DEPTH,
+            ] );
+            $stats['errors']++;
+            return $stats;
+        }
+
+        // Mehrfach-Uploads: Arrays rekursiv abarbeiten (mit Tiefenzähler).
         if ( is_array( $val ) ) {
             foreach ( $val as $v ) {
-                $res = self::del( $v );
+                $res = self::del( $v, $depth + 1 );
                 $stats['deleted'] += $res['deleted'];
                 $stats['errors'] += $res['errors'];
             }
@@ -1011,6 +1089,43 @@ class NF_AD_Uploads_Deleter {
         return '';
     }
     /**
+     * Sichere Deserialisierung von Daten OHNE Objekt-Instanziierung.
+     *
+     * SICHERHEIT (Code-Audit Fix): Verhindert PHP Object Injection (POI).
+     * `maybe_unserialize()` könnte bei bösartigen Payloads Objekte instanziieren,
+     * die via __wakeup() oder __destruct() Code ausführen.
+     *
+     * Diese Funktion erlaubt NUR skalare Werte und Arrays (keine Objekte).
+     *
+     * @param mixed $data Rohe Daten (möglicherweise serialisiert).
+     *
+     * @return mixed Deserialisierte Daten (nur Arrays/Strings/Integers, niemals Objekte).
+     */
+    private static function safe_unserialize( $data ) {
+        // Keine Deserialisierung nötig wenn nicht serialisiert.
+        if ( ! is_string( $data ) ) {
+            return $data;
+        }
+
+        // WordPress' is_serialized() Check.
+        if ( ! is_serialized( $data ) ) {
+            return $data;
+        }
+
+        // SICHERHEIT: allowed_classes => false verhindert Objekt-Instanziierung.
+        // Selbst wenn ein Angreifer einen bösartigen Payload in die DB injiziert,
+        // werden keine Objekte erstellt → kein __wakeup()/__destruct() Exploit möglich.
+        $unserialized = @unserialize( $data, array( 'allowed_classes' => false ) );
+
+        // Bei Fehler: Original zurückgeben (defensiv).
+        if ( false === $unserialized && 'b:0;' !== $data ) {
+            return $data;
+        }
+
+        return $unserialized;
+    }
+
+    /**
      * Normalize upload data from the File Uploads add-on table.
      * Supports serialized values, JSON, and mixed arrays.
      *
@@ -1019,7 +1134,8 @@ class NF_AD_Uploads_Deleter {
      * @return mixed
      */
     private static function normalize_upload_data( $raw ) {
-        $val = maybe_unserialize( $raw );
+        // SICHERHEIT: Nutze safe_unserialize() statt maybe_unserialize() (POI-Schutz).
+        $val = self::safe_unserialize( $raw );
 
         if ( is_string( $val ) ) {
             $trim = trim( $val );
@@ -1318,6 +1434,71 @@ class NF_AD_Uploads_Deleter {
             return false;
         }
 
+        return file_exists( $path_norm );
+    }
+
+    /**
+     * Prüft ob eine Datei-Referenz auf eine LOKAL existierende Datei zeigt.
+     *
+     * KRITISCH für externes Storage Support (S3, OneDrive, Google Cloud, etc.):
+     * Diese Funktion kombiniert smart_file_exists() Logik (Flag-Checks) mit
+     * resolve_file_reference_to_path() um zu bestimmen, ob eine Datei tatsächlich
+     * auf dem lokalen Server liegt.
+     *
+     * Drei-Stufen-Check:
+     * 1. SCHNELL: upload_location Flag prüfen (OneDrive Worker setzt dies)
+     * 2. SCHNELL: removed_from_server Flag prüfen
+     * 3. LANGSAM: file_exists() auf aufgelöstem Pfad
+     *
+     * @param mixed $ref Datei-Referenz (Array, String, oder Attachment-ID).
+     *
+     * @return bool True wenn Datei lokal existiert, false wenn extern oder nicht vorhanden.
+     */
+    private static function file_reference_exists_locally( $ref ) {
+        // STUFE 1 & 2: Flag-basierte Checks für bekannte externe Storage.
+        // Diese Flags werden vom OneDrive Worker oder offiziellen Cloud-Integrationen gesetzt.
+        if ( is_array( $ref ) ) {
+            // OneDrive/S3 Worker setzt upload_location != 'server'.
+            if ( isset( $ref['upload_location'] ) && 'server' !== $ref['upload_location'] ) {
+                return false; // Externe Storage → nicht lokal
+            }
+
+            // OneDrive Worker kann auch removed_from_server Flag setzen.
+            if ( isset( $ref['removed_from_server'] ) && $ref['removed_from_server'] ) {
+                return false; // Als entfernt markiert → nicht lokal
+            }
+        }
+
+        // STUFE 3: Pfad auflösen und tatsächliche Existenz prüfen.
+        $path = self::resolve_file_reference_to_path( $ref );
+        if ( ! $path || '' === $path ) {
+            return false;
+        }
+
+        // Jail-Check: Nur Dateien im Upload-Verzeichnis sind valide.
+        static $uploads_cache = null;
+        if ( null === $uploads_cache ) {
+            $u = wp_upload_dir();
+            $basedir = isset( $u['basedir'] ) ? (string) $u['basedir'] : '';
+            $real_base = $basedir ? realpath( $basedir ) : false;
+            $uploads_cache = array(
+                'real_base' => $real_base ? trailingslashit( wp_normalize_path( $real_base ) ) : '',
+            );
+        }
+
+        $real_base = (string) $uploads_cache['real_base'];
+        if ( '' === $real_base ) {
+            return false; // Upload-Verzeichnis nicht auflösbar
+        }
+
+        $path_norm = wp_normalize_path( (string) $path );
+
+        // Pfad muss innerhalb des Upload-Verzeichnisses liegen (Jail-Check).
+        if ( 0 !== strpos( trailingslashit( $path_norm ), $real_base ) ) {
+            return false; // Außerhalb Upload-Verzeichnis → nicht verarbeiten
+        }
+
+        // Finale Disk-Prüfung.
         return file_exists( $path_norm );
     }
 
