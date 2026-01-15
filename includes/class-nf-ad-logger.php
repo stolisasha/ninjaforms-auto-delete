@@ -25,6 +25,14 @@ class NF_AD_Logger {
      * Tabellenname für Cron-Run-Logs.
      */
     const TABLE_RUNS = 'nf_ad_cron_runs';
+    /**
+     * Maximale Anzahl an Error-Details pro Run.
+     *
+     * WARUM 50? Verhindert DB-Bloat bei großen Cleanup-Runs mit vielen Fehlern.
+     * 50 Fehlerdetails sind ausreichend für Debugging, ohne die DB zu überlasten.
+     * Bei mehr als 50 Fehlern wird ein Hinweis angehängt.
+     */
+    const MAX_ERROR_DETAILS = 50;
 
     // =============================================================================
     // DB RETRY LOGIC
@@ -133,6 +141,7 @@ class NF_AD_Logger {
             time datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
             status varchar(20) NOT NULL,
             message text,
+            error_details longtext,
             PRIMARY KEY  (id), KEY time (time)
         ) $charset;" );
     }
@@ -241,13 +250,14 @@ class NF_AD_Logger {
      * Behält das Run-Typ-Tag ([CRON] oder [MANUAL]) aus der Startnachricht bei,
      * damit im Dashboard zwischen automatischen und manuellen Runs unterschieden werden kann.
      *
-     * @param int    $run_id Run-ID (vom start_run() zurückgegeben).
-     * @param string $status Endstatus ('success', 'error', 'warning', 'skipped').
-     * @param string $msg    Abschlussnachricht.
+     * @param int    $run_id        Run-ID (vom start_run() zurückgegeben).
+     * @param string $status        Endstatus ('success', 'error', 'warning', 'skipped').
+     * @param string $msg           Abschlussnachricht.
+     * @param array  $error_details Optional: Array mit Fehlerdetails für Modal-Anzeige.
      *
      * @return void
      */
-    public static function finish_run( $run_id, $status, $msg ) {
+    public static function finish_run( $run_id, $status, $msg, $error_details = [] ) {
         global $wpdb;
         if ( ! $run_id ) {
             return;
@@ -267,16 +277,34 @@ class NF_AD_Logger {
             }
         }
 
+        // Fehlerdetails begrenzen, um DB-Bloat zu verhindern.
+        // Bei großen Cleanup-Runs mit vielen Fehlern könnte das Array sonst sehr groß werden.
+        if ( is_array( $error_details ) && count( $error_details ) > self::MAX_ERROR_DETAILS ) {
+            $truncated_count = count( $error_details ) - self::MAX_ERROR_DETAILS;
+            $error_details   = array_slice( $error_details, 0, self::MAX_ERROR_DETAILS );
+            $error_details[] = sprintf( '... und %d weitere Fehler (gekürzt)', $truncated_count );
+        }
+
+        // Fehlerdetails als JSON serialisieren (wenn vorhanden).
+        $error_details_json = ! empty( $error_details ) ? wp_json_encode( $error_details, JSON_UNESCAPED_UNICODE ) : null;
+
         $wpdb->update(
             $table,
             [
-                'status'  => $status,
-                'message' => $msg,
+                'status'        => $status,
+                'message'       => $msg,
+                'error_details' => $error_details_json,
             ],
             [ 'id' => $run_id ],
-            [ '%s', '%s' ],
+            [ '%s', '%s', '%s' ],
             [ '%d' ]
         );
+
+        // Cleanup mit demselben Limit wie die Logs (aus den Plugin-Einstellungen).
+        // WICHTIG: Wir rufen get_settings() nicht direkt hier auf, da der Logger
+        // unabhängig vom Dashboard funktionieren soll. Das Limit wird beim nächsten
+        // Cleanup durch run_cleanup_logic() mit dem korrekten Wert aufgerufen.
+        // Hier nur Fallback-Cleanup mit konservativem Default.
         self::cleanup_runs( 50 );
     }
 

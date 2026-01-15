@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Ninja Forms - Auto Delete
- * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen. 
- * Version: 2.2.3
+ * Description: Löscht Einträge und Dateianhänge automatisch nach einer festgelegten Anzahl von Tagen.
+ * Version: 3.0.0
  * Author: Alex Schlair
  * Author URI: https://www.pronto-media.at
  * Text Domain: nf-auto-delete
@@ -25,7 +25,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  );
  $nf_ad_version = isset( $nf_ad_plugin_data['Version'] ) ? trim( (string) $nf_ad_plugin_data['Version'] ) : '1.0.0';
  define( 'NF_AD_VERSION', $nf_ad_version );
-define( 'NF_AD_DB_VERSION', '1.2' );
+define( 'NF_AD_DB_VERSION', '1.3' );
 define( 'NF_AD_PATH', plugin_dir_path( __FILE__ ) );
 
 // =============================================================================
@@ -81,6 +81,7 @@ function nf_ad_init() {
     require_once NF_AD_PATH . 'includes/class-nf-ad-uploads-deleter.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-submissions-eraser.php';
     require_once NF_AD_PATH . 'includes/class-nf-ad-dashboard.php';
+    require_once NF_AD_PATH . 'includes/class-nf-ad-person-search.php';
 
     // Cron-Hook registrieren.
     add_action( 'nf_ad_daily_event', [ 'NF_AD_Submissions_Eraser', 'run_cleanup_cron' ] );
@@ -93,6 +94,13 @@ function nf_ad_init() {
         add_action( 'wp_ajax_nf_ad_clear_runs', [ 'NF_AD_Dashboard', 'ajax_clear_runs' ] );
         add_action( 'wp_ajax_nf_ad_force_cleanup', [ 'NF_AD_Dashboard', 'ajax_force_cleanup' ] );
         add_action( 'wp_ajax_nf_ad_calculate', [ 'NF_AD_Dashboard', 'ajax_calculate' ] );
+
+        // DSGVO Person Search (seit v2.4.0).
+        add_action( 'wp_ajax_nf_ad_person_search', [ 'NF_AD_Dashboard', 'ajax_person_search' ] );
+        add_action( 'wp_ajax_nf_ad_person_delete', [ 'NF_AD_Dashboard', 'ajax_person_delete' ] );
+
+        // Fehlerdetails für Cron-Runs abrufen (seit v3.0.0).
+        add_action( 'wp_ajax_nf_ad_get_run_errors', [ 'NF_AD_Dashboard', 'ajax_get_run_errors' ] );
     }
 
     /* --- Cron-Event validieren (Self-Healing) --- */

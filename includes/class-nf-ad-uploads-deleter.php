@@ -428,12 +428,12 @@ class NF_AD_Uploads_Deleter {
 
         // Wenn Dateien behalten werden sollen, gibt es nichts zu tun.
         if ( 'keep' === $file_action ) {
-            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false, 'error_details' => [] ];
         }
 
         // Defensive: Wenn Ninja Forms nicht geladen ist, abbrechen.
         if ( ! function_exists( 'Ninja_Forms' ) ) {
-            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false, 'error_details' => [] ];
         }
 
         $global = (int) ( $settings['global'] ?? 365 );
@@ -441,13 +441,14 @@ class NF_AD_Uploads_Deleter {
 
         // DEFENSIVE: Prüfe ob get_forms() valide Daten zurückgibt.
         if ( ! is_array( $forms ) || empty( $forms ) ) {
-            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false ];
+            return [ 'deleted' => 0, 'errors' => 0, 'has_more' => false, 'error_details' => [] ];
         }
 
-        $total_deleted = 0;
-        $total_errors  = 0;
-        $start         = time();
-        $limit_reached = false;
+        $total_deleted       = 0;
+        $total_errors        = 0;
+        $total_error_details = [];
+        $start               = time();
+        $limit_reached       = false;
 
         // Iteriere durch alle Formulare und lösche fällige Uploads.
         foreach ( $forms as $form ) {
@@ -490,8 +491,9 @@ class NF_AD_Uploads_Deleter {
             // Formular-Uploads bereinigen mit Batch-Processing.
             $form_result = self::cleanup_uploads_for_form_batched( $fid, $cutoff, $start );
 
-            $total_deleted += $form_result['deleted'];
-            $total_errors  += $form_result['errors'];
+            $total_deleted       += $form_result['deleted'];
+            $total_errors        += $form_result['errors'];
+            $total_error_details  = array_merge( $total_error_details, $form_result['error_details'] ?? [] );
 
             // Wenn das Formular das Zeitlimit erreicht hat, abbrechen.
             if ( $form_result['limit_reached'] ) {
@@ -508,9 +510,10 @@ class NF_AD_Uploads_Deleter {
         ] );
 
         return [
-            'deleted'  => $total_deleted,
-            'errors'   => $total_errors,
-            'has_more' => $limit_reached,
+            'deleted'       => $total_deleted,
+            'errors'        => $total_errors,
+            'has_more'      => $limit_reached,
+            'error_details' => $total_error_details,
         ];
     }
 
@@ -530,11 +533,12 @@ class NF_AD_Uploads_Deleter {
      * @return array{deleted:int,errors:int,limit_reached:bool}
      */
     private static function cleanup_uploads_for_form_batched( $fid, $cutoff, $start ) {
-        $total_deleted   = 0;
-        $total_errors    = 0;
-        $limit_reached   = false;
-        $last_id         = 0;
-        $deadlock_detector = 0;
+        $total_deleted       = 0;
+        $total_errors        = 0;
+        $total_error_details = [];
+        $limit_reached       = false;
+        $last_id             = 0;
+        $deadlock_detector   = 0;
 
         do {
             $prev_id = $last_id;
@@ -542,9 +546,10 @@ class NF_AD_Uploads_Deleter {
             // Einzelnen Batch verarbeiten.
             $batch_result = self::cleanup_uploads_for_form( (int) $fid, (string) $cutoff, self::BATCH_LIMIT, $last_id );
 
-            $total_deleted += (int) ( $batch_result['deleted'] ?? 0 );
-            $total_errors  += (int) ( $batch_result['errors'] ?? 0 );
-            $rows          = (int) ( $batch_result['rows'] ?? 0 );
+            $total_deleted       += (int) ( $batch_result['deleted'] ?? 0 );
+            $total_errors        += (int) ( $batch_result['errors'] ?? 0 );
+            $total_error_details  = array_merge( $total_error_details, $batch_result['error_details'] ?? [] );
+            $rows                 = (int) ( $batch_result['rows'] ?? 0 );
 
             // Sichere Progression: Immer das Maximum nehmen, nie rückwärts.
             $returned_id = (int) ( $batch_result['last_id'] ?? 0 );
@@ -590,6 +595,7 @@ class NF_AD_Uploads_Deleter {
             'deleted'       => $total_deleted,
             'errors'        => $total_errors,
             'limit_reached' => $limit_reached,
+            'error_details' => $total_error_details,
         ];
     }
 
@@ -834,7 +840,7 @@ class NF_AD_Uploads_Deleter {
      * @return array{deleted:int,errors:int}
      */
     public static function cleanup_files( $sid ) {
-        $stats = [ 'deleted' => 0, 'errors' => 0 ];
+        $stats = [ 'deleted' => 0, 'errors' => 0, 'error_details' => [] ];
         $fid = get_post_meta( $sid, '_form_id', true );
         if ( ! $fid ) {
             return $stats;
@@ -890,13 +896,15 @@ class NF_AD_Uploads_Deleter {
                             if ( is_array( $parsed ) ) {
                                 foreach ( $parsed as $ref ) {
                                     $res = self::delete_file_reference( $ref );
-                                    $stats['deleted'] += $res['deleted'];
-                                    $stats['errors']  += $res['errors'];
+                                    $stats['deleted']       += $res['deleted'];
+                                    $stats['errors']        += $res['errors'];
+                                    $stats['error_details']  = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
                                 }
                             } else {
                                 $res = self::delete_file_reference( $parsed );
-                                $stats['deleted'] += $res['deleted'];
-                                $stats['errors']  += $res['errors'];
+                                $stats['deleted']       += $res['deleted'];
+                                $stats['errors']        += $res['errors'];
+                                $stats['error_details']  = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
                             }
                         }
                         // Do not return here; allow legacy meta-based deletion to proceed for mixed installations.
@@ -949,8 +957,9 @@ class NF_AD_Uploads_Deleter {
 
             if ( $val ) {
                 $res = self::del( $val );
-                $stats['deleted'] += $res['deleted'];
-                $stats['errors'] += $res['errors'];
+                $stats['deleted']       += $res['deleted'];
+                $stats['errors']        += $res['errors'];
+                $stats['error_details']  = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
             }
         }
         return $stats;
@@ -974,14 +983,21 @@ class NF_AD_Uploads_Deleter {
      * @return array{deleted:int,errors:int,rows:int,last_id:int}
      */
     public static function cleanup_uploads_for_form( $fid, $cutoff, $limit = 50, $min_id = 0 ) {
-        $stats = [ 'deleted' => 0, 'errors' => 0, 'rows' => 0, 'last_id' => 0 ];
+        $stats = [ 'deleted' => 0, 'errors' => 0, 'rows' => 0, 'last_id' => 0, 'error_details' => [] ];
 
         $fid    = absint( $fid );
         $limit  = max( 1, absint( $limit ) );
         $min_id = max( 0, absint( $min_id ) );
 
         if ( ! $fid || ! is_string( $cutoff ) || '' === $cutoff ) {
+            $reason = ! $fid ? 'Form-ID fehlt' : ( ! is_string( $cutoff ) ? 'Cutoff ist kein String' : 'Cutoff ist leer' );
+            self::debug_log( 'cleanup_uploads_for_form: Invalid input parameters', [
+                'fid'    => $fid,
+                'cutoff' => $cutoff,
+                'reason' => $reason,
+            ] );
             $stats['errors']++;
+            $stats['error_details'][] = sprintf( 'Ungültige Parameter für Upload-Bereinigung: %s', $reason );
             return $stats;
         }
 
@@ -998,15 +1014,18 @@ class NF_AD_Uploads_Deleter {
         $uploads_columns = $schema['columns'];
         $uploads_types   = $schema['types'];
 
-        $data_col = in_array( 'data', $uploads_columns, true ) ? 'data' : null;
-        $date_col = self::detect_uploads_date_column( $uploads_columns );
-        $form_col = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
-        $id_col   = in_array( 'id', $uploads_columns, true ) ? 'id' : null;
+        $data_col  = in_array( 'data', $uploads_columns, true ) ? 'data' : null;
+        $date_col  = self::detect_uploads_date_column( $uploads_columns );
+        $form_col  = in_array( 'form_id', $uploads_columns, true ) ? 'form_id' : null;
+        $id_col    = in_array( 'id', $uploads_columns, true ) ? 'id' : null;
+        $field_col = in_array( 'field_id', $uploads_columns, true ) ? 'field_id' : null;
 
         // BUGFIX: Ohne ID-Spalte ist keine Pagination möglich.
+        // HINWEIS: Schema-Fehler sind KEINE verarbeitungsfehler - die Tabelle wird einfach übersprungen.
+        // Daher kein $stats['errors']++ (das würde "Fehler" im Status anzeigen obwohl nichts schiefging).
         if ( ! $data_col || ! $date_col || ! $form_col || ! $id_col ) {
             // DEBUG-LOGGING (Code-Audit Fix): Logge welche Spalte fehlt für Troubleshooting.
-            self::debug_log( 'Schema detection failed for uploads table', [
+            self::debug_log( 'Schema detection failed for uploads table - skipping (not an error)', [
                 'table' => $uploads_table,
                 'columns_found' => $uploads_columns,
                 'data_col' => $data_col,
@@ -1015,7 +1034,7 @@ class NF_AD_Uploads_Deleter {
                 'id_col' => $id_col,
                 'form_id' => $fid,
             ] );
-            $stats['errors']++;
+            // Kein Fehler-Inkrement - Schema-Inkompatibilität ist kein Verarbeitungsfehler.
             return $stats;
         }
 
@@ -1037,11 +1056,16 @@ class NF_AD_Uploads_Deleter {
             }
         }
 
-        // Lade Kandidaten-Zeilen (id + data + date) für dieses Formular, die älter als Cutoff sind.
+        // Lade Kandidaten-Zeilen (id + data + date + field_id) für dieses Formular, die älter als Cutoff sind.
         // BUGFIX: Pagination via min_id um Endlosschleifen bei übersprungenen Dateien zu vermeiden.
         // BUGFIX: Verwende $id_col statt hardcoded "id" für Kompatibilität.
         // NEU: date_col wird mitgeladen für das Log ("Eintrag vom" = Datei-Erstellungsdatum).
-        $sql  = "SELECT {$id_col}, {$data_col}, {$date_col} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} AND {$id_col} > %d ORDER BY {$id_col} ASC LIMIT %d";
+        // NEU: field_col wird mitgeladen für detailliertere Fehlermeldungen.
+        $select_cols = "{$id_col}, {$data_col}, {$date_col}";
+        if ( $field_col ) {
+            $select_cols .= ", {$field_col}";
+        }
+        $sql  = "SELECT {$select_cols} FROM {$uploads_table} WHERE {$form_col} = %d AND {$date_col} < {$date_placeholder}{$deleted_sql} AND {$id_col} > %d ORDER BY {$id_col} ASC LIMIT %d";
         $params = array_merge( array( $fid, $cutoff_value ), $deleted_params, array( $min_id, $limit ) );
         $rows = $wpdb->get_results( $wpdb->prepare( $sql, ...$params ), ARRAY_A );
 
@@ -1051,10 +1075,23 @@ class NF_AD_Uploads_Deleter {
 
         $stats['rows'] = count( $rows );
 
+        // Formularnamen für Fehlermeldungen vorab holen (einmalig, nicht pro Zeile).
+        $form_title = '';
+        if ( function_exists( 'Ninja_Forms' ) ) {
+            $form_obj = Ninja_Forms()->form( $fid )->get();
+            $form_title = is_object( $form_obj ) && method_exists( $form_obj, 'get_setting' )
+                ? $form_obj->get_setting( 'title' )
+                : '';
+        }
+        if ( empty( $form_title ) ) {
+            $form_title = 'Formular #' . $fid;
+        }
+
         foreach ( $rows as $row ) {
             // BUGFIX: Verwende $id_col statt hardcoded "id".
-            $row_id = isset( $row[ $id_col ] ) ? absint( $row[ $id_col ] ) : 0;
-            $raw    = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
+            $row_id   = isset( $row[ $id_col ] ) ? absint( $row[ $id_col ] ) : 0;
+            $raw      = isset( $row[ $data_col ] ) ? $row[ $data_col ] : '';
+            $field_id = ( $field_col && isset( $row[ $field_col ] ) ) ? absint( $row[ $field_col ] ) : 0;
 
             // Datei-Datum für Log extrahieren ("Eintrag vom").
             // Bei INT-Timestamp in DATETIME konvertieren, sonst direkt verwenden.
@@ -1065,6 +1102,9 @@ class NF_AD_Uploads_Deleter {
                 $row_date = is_string( $row_date_raw ) ? $row_date_raw : '';
             }
 
+            // Datum für Fehlermeldung formatieren (nur Datum, ohne Uhrzeit).
+            $row_date_display = $row_date ? wp_date( 'd.m.Y', strtotime( $row_date ) ) : 'unbekannt';
+
             // BUGFIX: Tracke die höchste ID für Pagination - MUSS immer gesetzt werden für Fortschritt.
             if ( $row_id > $stats['last_id'] ) {
                 $stats['last_id'] = $row_id;
@@ -1072,7 +1112,25 @@ class NF_AD_Uploads_Deleter {
 
             $parsed = self::normalize_upload_data( $raw );
             if ( empty( $parsed ) ) {
+                self::debug_log( 'cleanup_uploads_for_form: normalize_upload_data returned empty', [
+                    'row_id'   => $row_id,
+                    'field_id' => $field_id,
+                    'raw_type' => gettype( $raw ),
+                    'raw_preview' => is_string( $raw ) ? substr( $raw, 0, 200 ) : 'not-a-string',
+                ] );
                 $stats['errors']++;
+
+                // Detaillierte Fehlermeldung mit Formular, Feld-ID und Datum.
+                // HINWEIS: Diese Uploads-Tabelle hat keine submission_id, daher können wir nicht
+                // direkt zur Submission verlinken. Stattdessen zeigen wir alle verfügbaren Infos.
+                $error_msg = sprintf(
+                    'Leerer Upload-Eintrag in "%s" (Upload #%d, Feld #%d, vom %s)',
+                    $form_title,
+                    $row_id,
+                    $field_id,
+                    $row_date_display
+                );
+                $stats['error_details'][] = $error_msg;
                 continue;
             }
 
@@ -1083,7 +1141,7 @@ class NF_AD_Uploads_Deleter {
             // Neuer Ansatz: Lösche direkt. del() prüft selbst ob File existiert und
             // löscht nur existierende Files. Nicht-existente Files werden sauber ignoriert.
 
-            $del_stats = array( 'deleted' => 0, 'errors' => 0 );
+            $del_stats = array( 'deleted' => 0, 'errors' => 0, 'error_details' => [] );
 
             // KRITISCH (Code-Audit Fix): Prüfe ob Dateien auf lokalem Server existieren BEVOR gelöscht wird.
             // Verhindert Datenverlust bei externem Storage (S3, OneDrive, etc.):
@@ -1116,6 +1174,7 @@ class NF_AD_Uploads_Deleter {
                     $res = self::delete_file_reference( $ref );
                     $del_stats['deleted'] += $res['deleted'];
                     $del_stats['errors']  += $res['errors'];
+                    $del_stats['error_details'] = array_merge( $del_stats['error_details'], $res['error_details'] ?? [] );
 
                     // EINZELNER LOG-EINTRAG pro erfolgreich gelöschter Datei.
                     if ( $res['deleted'] > 0 && class_exists( 'NF_AD_Logger' ) ) {
@@ -1142,6 +1201,7 @@ class NF_AD_Uploads_Deleter {
                 $res = self::delete_file_reference( $parsed );
                 $del_stats['deleted'] += $res['deleted'];
                 $del_stats['errors']  += $res['errors'];
+                $del_stats['error_details'] = array_merge( $del_stats['error_details'], $res['error_details'] ?? [] );
 
                 // EINZELNER LOG-EINTRAG pro erfolgreich gelöschter Datei.
                 if ( $res['deleted'] > 0 && class_exists( 'NF_AD_Logger' ) ) {
@@ -1158,6 +1218,7 @@ class NF_AD_Uploads_Deleter {
 
             $stats['deleted'] += $del_stats['deleted'];
             $stats['errors']  += $del_stats['errors'];
+            $stats['error_details'] = array_merge( $stats['error_details'], $del_stats['error_details'] );
 
             // BUGFIX (Code-Audit): DB-Eintrag löschen wenn KEINE Fehler auftraten (unabhängig von deleted).
             //
@@ -1187,6 +1248,7 @@ class NF_AD_Uploads_Deleter {
                 if ( false === $result && ! empty( $wpdb->last_error ) ) {
                     error_log( '[NF Auto Delete] DB delete failed for upload ID ' . $row_id . ': ' . $wpdb->last_error );
                     $stats['errors']++;
+                    $stats['error_details'][] = sprintf( 'DB-Löschung fehlgeschlagen für Upload ID %d: %s', $row_id, $wpdb->last_error );
                 }
             }
         }
@@ -1235,7 +1297,7 @@ class NF_AD_Uploads_Deleter {
      * @return array{deleted:int,errors:int}
      */
     private static function del( $val, $depth = 0 ) {
-        $stats = [ 'deleted' => 0, 'errors' => 0 ];
+        $stats = [ 'deleted' => 0, 'errors' => 0, 'error_details' => [] ];
 
         // SICHERHEIT: Rekursionstiefe prüfen (verhindert Stack Overflow bei fehlerhaften Daten).
         if ( $depth > self::MAX_RECURSION_DEPTH ) {
@@ -1244,6 +1306,7 @@ class NF_AD_Uploads_Deleter {
                 'max' => self::MAX_RECURSION_DEPTH,
             ] );
             $stats['errors']++;
+            $stats['error_details'][] = 'Maximale Rekursionstiefe überschritten (fehlerhafte Datenstruktur)';
             return $stats;
         }
 
@@ -1253,6 +1316,7 @@ class NF_AD_Uploads_Deleter {
                 $res = self::del( $v, $depth + 1 );
                 $stats['deleted'] += $res['deleted'];
                 $stats['errors'] += $res['errors'];
+                $stats['error_details'] = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
             }
             return $stats;
         }
@@ -1272,7 +1336,11 @@ class NF_AD_Uploads_Deleter {
 
             // Symlink-Schutz: Symlinks werden nie gelöscht. Prüfung erfolgt vor realpath().
             if ( is_link( $path ) ) {
+                self::debug_log( 'del: Symlink detected - refusing to delete', [
+                    'path' => $path,
+                ] );
                 $stats['errors']++;
+                $stats['error_details'][] = sprintf( 'Symlink erkannt - Löschen verweigert: %s', basename( $path ) );
                 // Keine Symlinks löschen (Angriffsvektor über Pfad-Manipulation).
                 return $stats;
             }
@@ -1290,7 +1358,11 @@ class NF_AD_Uploads_Deleter {
             $check_path = trailingslashit( $real_path );
             if ( $real_base && $real_path && 0 === strpos( $check_path, $real_base ) ) {
                 if ( '' === $real_path ) {
+                    self::debug_log( 'del: Empty real_path after normalization', [
+                        'original_path' => $path,
+                    ] );
                     $stats['errors']++;
+                    $stats['error_details'][] = sprintf( 'Pfad-Normalisierung fehlgeschlagen: %s', basename( $path ) );
                     return $stats;
                 }
                 wp_delete_file( $real_path );
@@ -1298,11 +1370,21 @@ class NF_AD_Uploads_Deleter {
                 if ( ! file_exists( $real_path ) ) {
                     $stats['deleted']++;
                 } else {
+                    self::debug_log( 'del: wp_delete_file failed - file still exists', [
+                        'path' => $real_path,
+                    ] );
                     $stats['errors']++;
+                    $stats['error_details'][] = sprintf( 'Datei konnte nicht gelöscht werden: %s', basename( $real_path ) );
                 }
             } else {
                 // Pfad liegt außerhalb des Upload-Verzeichnisses: aus Sicherheitsgründen abbrechen.
+                self::debug_log( 'del: Jail check failed - path outside uploads directory', [
+                    'path'      => $path,
+                    'real_path' => $real_path,
+                    'real_base' => $real_base,
+                ] );
                 $stats['errors']++;
+                $stats['error_details'][] = sprintf( 'Sicherheitsprüfung fehlgeschlagen - Datei außerhalb des Upload-Verzeichnisses: %s', basename( $path ) );
             }
         }
         return $stats;
@@ -1483,7 +1565,7 @@ class NF_AD_Uploads_Deleter {
      * @return array{deleted:int,errors:int}
      */
     private static function delete_file_reference( $ref ) {
-        $stats = [ 'deleted' => 0, 'errors' => 0 ];
+        $stats = [ 'deleted' => 0, 'errors' => 0, 'error_details' => [] ];
 
         if ( is_array( $ref ) ) {
             if ( isset( $ref['attachment_id'] ) && is_numeric( $ref['attachment_id'] ) ) {
@@ -1521,7 +1603,11 @@ class NF_AD_Uploads_Deleter {
                 $ref = $picked ? $picked : $candidates[0];
             } else {
                 // Unknown array shape.
+                self::debug_log( 'delete_file_reference: Unknown array shape', [
+                    'keys' => array_keys( $ref ),
+                ] );
                 $stats['errors']++;
+                $stats['error_details'][] = sprintf( 'Unbekannte Array-Struktur mit Keys: %s', implode( ', ', array_keys( $ref ) ) );
                 return $stats;
             }
         }
@@ -1533,9 +1619,14 @@ class NF_AD_Uploads_Deleter {
                 $res = self::del( $file );
                 $stats['deleted'] += $res['deleted'];
                 $stats['errors']  += $res['errors'];
+                $stats['error_details'] = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
                 return $stats;
             }
+            self::debug_log( 'delete_file_reference: get_attached_file returned empty for attachment ID', [
+                'attachment_id' => (int) $ref,
+            ] );
             $stats['errors']++;
+            $stats['error_details'][] = sprintf( 'Attachment ID %d existiert nicht in der Mediathek', (int) $ref );
             return $stats;
         }
 
@@ -1544,10 +1635,16 @@ class NF_AD_Uploads_Deleter {
             $res = self::del( $ref );
             $stats['deleted'] += $res['deleted'];
             $stats['errors']  += $res['errors'];
+            $stats['error_details'] = array_merge( $stats['error_details'], $res['error_details'] ?? [] );
             return $stats;
         }
 
+        self::debug_log( 'delete_file_reference: Unhandled reference type', [
+            'ref_type' => gettype( $ref ),
+            'ref_value' => is_scalar( $ref ) ? $ref : 'non-scalar',
+        ] );
         $stats['errors']++;
+        $stats['error_details'][] = sprintf( 'Unbehandelter Referenz-Typ: %s', gettype( $ref ) );
         return $stats;
     }
 

@@ -259,7 +259,7 @@ class NF_AD_Submissions_Eraser {
         if ( get_transient( 'nf_ad_cleanup_running' ) ) {
             $run_id = NF_AD_Logger::start_run( 'Cleanup übersprungen (Lock aktiv)' );
             NF_AD_Logger::finish_run( $run_id, 'skipped', 'Anderer Cleanup-Prozess läuft bereits.' );
-            return ['deleted' => 0, 'has_more' => false];
+            return ['deleted' => 0, 'has_more' => false, 'errors' => 0, 'error_details' => []];
         }
 
         // Lock setzen: Verhindert parallele Ausführung für 1 Stunde (dann automatischer Timeout).
@@ -281,7 +281,7 @@ class NF_AD_Submissions_Eraser {
         $type_tag = $is_cron ? '[CRON]' : '[MANUAL]';
         $msg_text = $is_cron ? 'Auto-Cron gestartet' : 'Manuelle Bereinigung gestartet';
         $run_id   = NF_AD_Logger::start_run( "$type_tag $msg_text [$mode_info]..." );
-        $response = ['deleted' => 0, 'has_more' => false];
+        $response = ['deleted' => 0, 'has_more' => false, 'errors' => 0, 'error_details' => []];
 
         // Cron-Ausführung ist aktiv aufgerufen, aber in den Einstellungen deaktiviert: Run sauber abschließen.
         if ( $is_cron && empty($settings['cron_active']) ) {
@@ -305,6 +305,7 @@ class NF_AD_Submissions_Eraser {
         $total_files   = 0;  // Zähler für gelöschte Dateien
         $errors        = 0;
         $warnings      = 0;
+        $error_details = []; // Details zu aufgetretenen Fehlern für Modal-Anzeige
         $limit_reached = false;
 
         // CRITICAL: Try-Catch Block um Lock IMMER freizugeben, auch bei Fehlern.
@@ -323,8 +324,9 @@ class NF_AD_Submissions_Eraser {
 
                 $upload_result = NF_AD_Uploads_Deleter::run_cleanup( $is_cron );
 
-                $total_files += (int) ( $upload_result['deleted'] ?? 0 );
-                $errors      += (int) ( $upload_result['errors'] ?? 0 );
+                $total_files   += (int) ( $upload_result['deleted'] ?? 0 );
+                $errors        += (int) ( $upload_result['errors'] ?? 0 );
+                $error_details  = array_merge( $error_details, $upload_result['error_details'] ?? [] );
 
                 // Wenn Upload-Cleanup das Zeitlimit erreicht hat, trotzdem mit Submissions weitermachen.
                 // Das Zeitlimit gilt pro Phase, nicht global.
@@ -449,8 +451,12 @@ class NF_AD_Submissions_Eraser {
                 $status_msg .= " ({$errors} Fehler, {$warnings} Warnungen)";
             }
 
-            NF_AD_Logger::finish_run( $run_id, $final_status, $status_msg );
-            NF_AD_Logger::cleanup_logs( $settings['log_limit'] ?? 256 );
+            NF_AD_Logger::finish_run( $run_id, $final_status, $status_msg, $error_details );
+
+            // Cleanup: Alte Logs und Runs entfernen (beide mit demselben Limit aus den Einstellungen).
+            $log_limit = $settings['log_limit'] ?? 256;
+            NF_AD_Logger::cleanup_logs( $log_limit );
+            NF_AD_Logger::cleanup_runs( $log_limit );
 
         } catch ( Throwable $e ) {
             // CRITICAL: Bei JEDEM Fehler (auch Fatal Errors) MUSS der Run sauber abgeschlossen werden.
@@ -458,7 +464,7 @@ class NF_AD_Submissions_Eraser {
             $error_msg = 'FATAL ERROR: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine();
             error_log( '[NF Auto Delete] ' . $error_msg );
 
-            NF_AD_Logger::finish_run( $run_id, 'error', $error_msg );
+            NF_AD_Logger::finish_run( $run_id, 'error', $error_msg, [ $error_msg ] );
 
         } finally {
             // GUARANTEE: Lock wird IMMER freigegeben, egal ob Erfolg oder Fehler.
@@ -469,8 +475,10 @@ class NF_AD_Submissions_Eraser {
         // Return-Wert: Kombiniert beide Zähler für die AJAX-Response.
         // Das Modal zeigt "X verarbeitet", was jetzt Submissions + Dateien summiert.
         return [
-            'deleted'  => $total_subs + $total_files,
-            'has_more' => $limit_reached,
+            'deleted'       => $total_subs + $total_files,
+            'has_more'      => $limit_reached,
+            'errors'        => $errors,
+            'error_details' => $error_details,
         ];
     }
 

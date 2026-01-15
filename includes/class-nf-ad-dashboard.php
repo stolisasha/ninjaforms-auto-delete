@@ -58,6 +58,19 @@ class NF_AD_Dashboard {
             @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
             .hidden { display: none !important; }
             .nf-ad-danger { color: #d63638; font-weight: 600; }
+            .nf-ad-error { color: #d63638; font-weight: 600; }
+
+            /* --- Person Search: Sub-Tables --- */
+            .nf-ad-table-person { border-collapse: collapse; }
+            .nf-ad-table-person .nf-ad-submission-row { background: #f6f7f7; border-top: 1px solid #c3c4c7; }
+            .nf-ad-table-person .nf-ad-submission-row td { padding: 12px 10px; vertical-align: middle; }
+            .nf-ad-table-person .nf-ad-fields-row { background: #fff; }
+            .nf-ad-table-person .nf-ad-fields-row > td { padding: 0 10px 15px 10px; border-bottom: 1px solid #e0e0e0; }
+            .nf-ad-fields-table { width: 100%; margin: 5px 0 0 0; background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; }
+            .nf-ad-fields-table td { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
+            .nf-ad-fields-table tr:last-child td { border-bottom: none; }
+            .nf-ad-field-label { width: 150px; font-weight: 600; color: #50575e; background: #f0f0f1; }
+            .nf-ad-field-value { color: #1d2327; word-break: break-word; }
             
             /* --- Layout Grundlagen --- */
             .wrap h1 { margin-bottom: 20px; }
@@ -99,7 +112,19 @@ class NF_AD_Dashboard {
 
             /* --- Modals & Listen --- */
             .nf-ad-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; display: none; justify-content: center; align-items: center; }
-            .nf-ad-modal { background: #fff; width: 500px; max-width: 90%; padding: 30px; border-radius: 4px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+            .nf-ad-modal { background: #fff; width: 500px; max-width: 90%; padding: 0; border-radius: 4px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); display: flex; flex-direction: column; }
+            .nf-ad-modal-header { padding: 20px 25px; border-bottom: 1px solid #dcdcde; }
+            .nf-ad-modal-header h2 { margin: 0; font-size: 1.3em; }
+            .nf-ad-modal-body { padding: 25px; flex: 1; max-height: 400px; overflow-y: auto; }
+            .nf-ad-modal-footer { padding: 15px 25px; border-top: 1px solid #dcdcde; display: flex; justify-content: space-between; align-items: center; background: #f6f7f7; }
+            .nf-ad-modal-footer.end { justify-content: flex-end; }
+            .nf-ad-preview-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f0f0f1; }
+            .nf-ad-preview-item:last-child { border-bottom: none; }
+            .nf-ad-preview-icon { font-size: 20px; width: 30px; text-align: center; }
+            .nf-ad-preview-text { flex: 1; }
+            .nf-ad-preview-text strong { display: block; color: #1d2327; }
+            .nf-ad-preview-text span { font-size: 12px; color: #646970; }
+            .nf-ad-preview-warning { background: #fcf0f1; border: 1px solid #d63638; border-radius: 4px; padding: 12px 15px; margin-top: 15px; color: #8a2424; font-size: 13px; }
             .nf-ad-progress-list { max-height: 300px; overflow-y: auto; margin: 20px 0; border: 1px solid #ddd; background: #f9f9f9; padding: 10px; list-style: none; }
             .nf-ad-progress-list li { padding: 5px; border-bottom: 1px solid #eee; font-size: 13px; display: flex; align-items: center; }
 
@@ -188,19 +213,64 @@ class NF_AD_Dashboard {
             $base_url = add_query_arg( [ 'page' => 'nf-auto-delete' ], admin_url( 'admin.php' ) );
             $tab_logs_url = add_query_arg( [ 'tab' => 'logs' ], $base_url );
             $tab_rules_url = add_query_arg( [ 'tab' => 'rules' ], $base_url );
+            $tab_person_url = add_query_arg( [ 'tab' => 'person' ], $base_url );
             $tab_settings_url = add_query_arg( [ 'tab' => 'settings' ], $base_url );
             ?>
             <nav class="nav-tab-wrapper">
-                <a href="<?php echo esc_url( $tab_logs_url ); ?>" class="nav-tab <?php echo $active_tab === 'logs' ? 'nav-tab-active' : ''; ?>">Log</a>
-                <a href="<?php echo esc_url( $tab_rules_url ); ?>" class="nav-tab <?php echo $active_tab === 'rules' ? 'nav-tab-active' : ''; ?>">Fristen definieren</a>
-                <a href="<?php echo esc_url( $tab_settings_url ); ?>" class="nav-tab <?php echo $active_tab === 'settings' ? 'nav-tab-active' : ''; ?>">Einstellungen</a>
+                <a href="<?php echo esc_url( $tab_logs_url ); ?>" class="nav-tab <?php echo 'logs' === $active_tab ? 'nav-tab-active' : ''; ?>">Log</a>
+                <a href="<?php echo esc_url( $tab_rules_url ); ?>" class="nav-tab <?php echo 'rules' === $active_tab ? 'nav-tab-active' : ''; ?>">Fristen definieren</a>
+                <a href="<?php echo esc_url( $tab_person_url ); ?>" class="nav-tab <?php echo 'person' === $active_tab ? 'nav-tab-active' : ''; ?>">Suche in Formularen</a>
+                <a href="<?php echo esc_url( $tab_settings_url ); ?>" class="nav-tab <?php echo 'settings' === $active_tab ? 'nav-tab-active' : ''; ?>">Einstellungen</a>
             </nav>
 
+            <!-- Preview Modal (Dry-Run Ergebnisse) -->
+            <div id="preview-modal" class="nf-ad-modal-overlay">
+                <div class="nf-ad-modal">
+                    <div class="nf-ad-modal-header">
+                        <h2>Bereinigung starten?</h2>
+                    </div>
+                    <div class="nf-ad-modal-body">
+                        <div id="preview-content"></div>
+                        <div class="nf-ad-preview-warning">
+                            <strong>Achtung:</strong> Dieser Vorgang kann nicht rückgängig gemacht werden.
+                        </div>
+                    </div>
+                    <div class="nf-ad-modal-footer">
+                        <button type="button" id="preview-cancel" class="button">Abbrechen</button>
+                        <button type="button" id="preview-start" class="button button-primary">Bereinigung starten</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Batch Modal (Fortschritt) -->
             <div id="batch-modal" class="nf-ad-modal-overlay">
                 <div class="nf-ad-modal">
-                    <h2>Bereinigung läuft...</h2>
-                    <ul id="batch-log" class="nf-ad-progress-list"></ul>
-                    <button type="button" id="close-modal" class="button button-primary" style="display:none;" onclick="location.reload()">Fertig - Seite neu laden</button>
+                    <div class="nf-ad-modal-header">
+                        <h2 id="batch-title">Bereinigung läuft...</h2>
+                    </div>
+                    <div class="nf-ad-modal-body">
+                        <ul id="batch-log" class="nf-ad-progress-list"></ul>
+                    </div>
+                    <div class="nf-ad-modal-footer" id="batch-footer">
+                        <button type="button" id="batch-cancel" class="button">Abbrechen</button>
+                        <span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error Details Modal -->
+            <div id="error-details-modal" class="nf-ad-modal-overlay">
+                <div class="nf-ad-modal">
+                    <div class="nf-ad-modal-header">
+                        <h2>Fehlerdetails</h2>
+                    </div>
+                    <div class="nf-ad-modal-body">
+                        <p style="margin-bottom:10px;">Folgende Fehler sind während der Bereinigung aufgetreten:</p>
+                        <ul id="error-details-list" style="list-style:disc; margin-left:20px; max-height:300px; overflow-y:auto;"></ul>
+                    </div>
+                    <div class="nf-ad-modal-footer" style="justify-content:flex-end;">
+                        <button type="button" id="error-details-close" class="button button-primary">Schließen</button>
+                    </div>
                 </div>
             </div>
 
@@ -307,8 +377,9 @@ class NF_AD_Dashboard {
                                     if (res && res.success && res.data && typeof res.data.count !== 'undefined') {
                                         var txt = (res.data.type === 'subs') ? 'Einträge' : 'Uploads';
                                         // BUGFIX: Zeige "5000+" wenn Performance-Limit erreicht wurde.
+                                        // BUGFIX #2: Nur "+" anzeigen wenn count > 0 (sonst verwirrend "0+").
                                         var count_display = res.data.count;
-                                        if (res.data.limit_reached) {
+                                        if (res.data.limit_reached && res.data.count > 0) {
                                             count_display = count_display + '+';
                                         }
 
@@ -339,7 +410,12 @@ class NF_AD_Dashboard {
                     });
                     </script>
 
-                <?php elseif ( $active_tab === 'settings' ) : ?>
+                <?php elseif ( 'person' === $active_tab ) : ?>
+                    <div class="nf-ad-tab-content">
+                        <?php self::render_person_tab(); ?>
+                    </div>
+
+                <?php elseif ( 'settings' === $active_tab ) : ?>
                     <div class="nf-ad-tab-content">
                         <input type="hidden" name="nf_ad_context" value="settings">
                         <div class="nf-ad-headline-row"><h2>Lösch-Umfang</h2></div>
@@ -409,26 +485,240 @@ class NF_AD_Dashboard {
                     <script>
                     jQuery(document).ready(function($) {
                         var batchCounter = 1;
+                        var batchCancelled = false;
+                        var currentXhr = null;
+                        var collectedErrors = [];  // Sammelt Fehlerdetails über alle Batches
+                        var totalErrorCount = 0;   // Gesamtzahl der Fehler
+
+                        // Zeigt den "Fertig" Zustand im Batch-Modal.
+                        function showBatchFinished(message, isError) {
+                            $('#batch-title').text(isError ? 'Fehler' : 'Bereinigung abgeschlossen');
+                            if (!isError) {
+                                // Wenn Fehler gesammelt wurden, als klickbaren Link anzeigen
+                                if (totalErrorCount > 0) {
+                                    var errorLink = '<a href="#" id="show-error-details" style="color:#d63638; text-decoration:underline; cursor:pointer;">' + totalErrorCount + ' Fehler</a>';
+                                    $('#batch-log').append('<li style="font-weight:bold;">' + message + ' (' + errorLink + ')</li>');
+                                } else {
+                                    $('#batch-log').append('<li style="color:green; font-weight:bold;">' + message + '</li>');
+                                }
+                            }
+                            // Footer: Nur "Fertig" Button rechtsbündig.
+                            $('#batch-footer').addClass('end').html(
+                                '<button type="button" class="button button-primary" onclick="location.reload()">Fertig - Seite neu laden</button>'
+                            );
+
+                            // Event-Handler für Error-Details Link
+                            $('#show-error-details').click(function(e) {
+                                e.preventDefault();
+                                showErrorDetailsModal();
+                            });
+                        }
+
+                        // Zeigt das Error-Details-Modal an.
+                        function showErrorDetailsModal() {
+                            var list = $('#error-details-list');
+                            list.empty();
+                            if (collectedErrors.length === 0) {
+                                list.append('<li>Keine Details verfügbar.</li>');
+                            } else {
+                                collectedErrors.forEach(function(err) {
+                                    list.append('<li>' + $('<div>').text(err).html() + '</li>');
+                                });
+                            }
+                            $('#error-details-modal').css('display', 'flex');
+                        }
+
+                        // Error-Details-Modal schließen.
+                        $('#error-details-close').click(function() {
+                            $('#error-details-modal').css('display', 'none');
+                        });
+
+                        // =============================================================
+                        // UX: ESC-Taste und Backdrop-Klick zum Schließen von Modals
+                        // =============================================================
+
+                        // ESC-Taste schließt offene Modals (außer laufender Batch).
+                        $(document).on('keydown', function(e) {
+                            if (e.keyCode === 27) { // ESC
+                                // Batch-Modal NICHT schließen während Verarbeitung läuft.
+                                if ($('#batch-modal').is(':visible') && !$('#batch-footer').hasClass('end')) {
+                                    return;
+                                }
+                                $('.nf-ad-modal-overlay:visible').css('display', 'none');
+                            }
+                        });
+
+                        // Klick auf Backdrop (außerhalb Modal) schließt Modal.
+                        $('.nf-ad-modal-overlay').on('click', function(e) {
+                            // Nur schließen wenn direkt auf Overlay geklickt (nicht auf Modal-Inhalt).
+                            if ($(e.target).hasClass('nf-ad-modal-overlay')) {
+                                // Batch-Modal NICHT schließen während Verarbeitung läuft.
+                                if ($(this).attr('id') === 'batch-modal' && !$('#batch-footer').hasClass('end')) {
+                                    return;
+                                }
+                                $(this).css('display', 'none');
+                            }
+                        });
+
+                        // Zeigt den "Abgebrochen" Zustand.
+                        function showBatchCancelled() {
+                            $('#batch-title').text('Bereinigung abgebrochen');
+                            $('#batch-log').append('<li style="color:#996800; font-weight:bold;">Abgebrochen durch Benutzer.</li>');
+                            $('#batch-footer').addClass('end').html(
+                                '<button type="button" class="button button-primary" onclick="location.reload()">Seite neu laden</button>'
+                            );
+                        }
+
+                        // Batch-Verarbeitung.
                         function runBatch() {
+                            if (batchCancelled) {
+                                showBatchCancelled();
+                                return;
+                            }
+
                             var li = $('<li class="loading"><span class="dashicons dashicons-update"></span> Batch ' + batchCounter + ' läuft...</li>');
                             $('#batch-log').append(li);
                             var list = document.getElementById('batch-log'); list.scrollTop = list.scrollHeight;
 
-                            $.post(ajaxurl, {action: 'nf_ad_force_cleanup', security: NF_AD_Config.nonce}, function(res) {
+                            currentXhr = $.post(ajaxurl, {action: 'nf_ad_force_cleanup', security: NF_AD_Config.nonce}, function(res) {
+                                currentXhr = null;
+                                if (batchCancelled) {
+                                    li.removeClass('loading');
+                                    li.html('<span class="dashicons dashicons-marker"></span> Batch ' + batchCounter + ' abgebrochen.');
+                                    showBatchCancelled();
+                                    return;
+                                }
+
                                 li.removeClass('loading').addClass('done');
                                 li.find('.dashicons').removeClass('dashicons-update').addClass('dashicons-yes');
                                 if(res.success) {
+                                    // Fehler aus diesem Batch sammeln
+                                    if (res.data.errors && res.data.errors > 0) {
+                                        totalErrorCount += res.data.errors;
+                                    }
+                                    if (res.data.error_details && res.data.error_details.length > 0) {
+                                        collectedErrors = collectedErrors.concat(res.data.error_details);
+                                    }
+
                                     li.html('<span class="dashicons dashicons-yes"></span> Batch ' + batchCounter + ': ' + res.data.deleted + ' Löschungen.');
-                                    if(res.data.has_more) { batchCounter++; runBatch(); } 
-                                    else { $('#batch-log').append('<li style="color:green; font-weight:bold;">Fertig!</li>'); $('#close-modal').show(); }
-                                } else { li.html('<span class="dashicons dashicons-warning"></span> ' + res.data); $('#close-modal').show(); }
-                            }).fail(function() { li.html('Fehler (500).'); $('#close-modal').show(); });
+                                    if(res.data.has_more) {
+                                        batchCounter++;
+                                        runBatch();
+                                    } else {
+                                        showBatchFinished('Fertig!', false);
+                                    }
+                                } else {
+                                    li.html('<span class="dashicons dashicons-warning"></span> ' + res.data);
+                                    showBatchFinished(res.data, true);
+                                }
+                            }).fail(function() {
+                                currentXhr = null;
+                                if (!batchCancelled) {
+                                    li.html('Fehler (500).');
+                                    showBatchFinished('Server-Fehler aufgetreten.', true);
+                                }
+                            });
                         }
+
+                        // Preview-Modal schließen.
+                        $('#preview-cancel').click(function() {
+                            $('#preview-modal').css('display', 'none');
+                        });
+
+                        // Von Preview zu Batch wechseln.
+                        $('#preview-start').click(function() {
+                            $('#preview-modal').css('display', 'none');
+                            // Batch-Modal initialisieren und starten.
+                            $('#batch-modal').css('display', 'flex');
+                            $('#batch-log').html('');
+                            $('#batch-title').text('Bereinigung läuft...');
+                            $('#batch-footer').removeClass('end').html(
+                                '<button type="button" id="batch-cancel" class="button">Abbrechen</button><span></span>'
+                            );
+                            // Event-Handler für neuen Cancel-Button.
+                            $('#batch-cancel').click(function() {
+                                batchCancelled = true;
+                                $(this).prop('disabled', true).text('Wird abgebrochen...');
+                                if (currentXhr) {
+                                    currentXhr.abort();
+                                }
+                            });
+                            batchCounter = 1;
+                            batchCancelled = false;
+                            collectedErrors = [];
+                            totalErrorCount = 0;
+                            runBatch();
+                        });
+
+                        // Bereinigung starten Button.
                         $('#force-run').click(function(e) {
                             e.preventDefault();
-                            if(!confirm('Soll die Bereinigung jetzt starten?')) return;
-                            $('#batch-modal').css('display', 'flex'); $('#batch-log').html(''); $('#close-modal').hide();
-                            batchCounter = 1; runBatch(); 
+                            var btn = $(this);
+                            btn.prop('disabled', true).text('Berechne...');
+
+                            // Beide Dry-Runs parallel ausführen.
+                            var subsDone = $.Deferred();
+                            var filesDone = $.Deferred();
+
+                            $.post(ajaxurl, {action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: 'subs'})
+                                .done(function(res) { subsDone.resolve(res.success ? res.data : null); })
+                                .fail(function() { subsDone.resolve(null); });
+
+                            $.post(ajaxurl, {action: 'nf_ad_calculate', security: NF_AD_Config.nonce, type: 'files'})
+                                .done(function(res) { filesDone.resolve(res.success ? res.data : null); })
+                                .fail(function() { filesDone.resolve(null); });
+
+                            // Warten auf beide Ergebnisse.
+                            $.when(subsDone, filesDone).done(function(subs, files) {
+                                btn.prop('disabled', false).text('Jetzt ausführen');
+
+                                // Preview-Content aufbauen.
+                                var html = '';
+                                if (subs && subs.count > 0) {
+                                    html += '<div class="nf-ad-preview-item">';
+                                    html += '<span class="nf-ad-preview-icon dashicons dashicons-list-view"></span>';
+                                    html += '<div class="nf-ad-preview-text">';
+                                    html += '<strong>' + subs.count + ' Einträge</strong>';
+                                    if (subs.active > 0 && subs.trashed > 0) {
+                                        html += '<span>' + subs.active + ' aktiv, ' + subs.trashed + ' im Papierkorb</span>';
+                                    } else if (subs.active > 0) {
+                                        html += '<span>' + subs.active + ' aktive Einträge</span>';
+                                    } else if (subs.trashed > 0) {
+                                        html += '<span>' + subs.trashed + ' im Papierkorb</span>';
+                                    }
+                                    html += '</div></div>';
+                                } else {
+                                    html += '<div class="nf-ad-preview-item">';
+                                    html += '<span class="nf-ad-preview-icon dashicons dashicons-yes" style="color:#00a32a;"></span>';
+                                    html += '<div class="nf-ad-preview-text">';
+                                    html += '<strong>Keine Einträge</strong>';
+                                    html += '<span>Keine Einträge zum Verarbeiten</span>';
+                                    html += '</div></div>';
+                                }
+
+                                if (files && files.count > 0) {
+                                    html += '<div class="nf-ad-preview-item">';
+                                    html += '<span class="nf-ad-preview-icon dashicons dashicons-media-default"></span>';
+                                    html += '<div class="nf-ad-preview-text">';
+                                    html += '<strong>' + files.count + ' Dateien</strong>';
+                                    if (files.limit_reached) {
+                                        html += '<span>Limit erreicht, evtl. mehr vorhanden</span>';
+                                    } else {
+                                        html += '<span>werden gelöscht</span>';
+                                    }
+                                    html += '</div></div>';
+                                } else {
+                                    html += '<div class="nf-ad-preview-item">';
+                                    html += '<span class="nf-ad-preview-icon dashicons dashicons-yes" style="color:#00a32a;"></span>';
+                                    html += '<div class="nf-ad-preview-text">';
+                                    html += '<strong>Keine Dateien</strong>';
+                                    html += '<span>Keine Dateien zum Löschen</span>';
+                                    html += '</div></div>';
+                                }
+
+                                $('#preview-content').html(html);
+                                $('#preview-modal').css('display', 'flex');
+                            });
                         });
                     });
                     </script>
@@ -527,6 +817,24 @@ class NF_AD_Dashboard {
                                 '[WARNING]' => '<strong style="color:#b45309">[WARNING]</strong>',
                                 '[SKIP]'    => '<strong style="color:#6b7280">[SKIP]</strong>',
                             ];
+                            // Fehlerdetails inline verlinken (WordPress-native Blau).
+                            // Ersetzt "(X Fehler, Y Warnungen)" durch "(X Fehler [Link], Y Warnungen)".
+                            if ( ! empty( $run['error_details'] ) ) {
+                                $error_arr = json_decode( $run['error_details'], true );
+                                if ( is_array( $error_arr ) && count( $error_arr ) > 0 ) {
+                                    $run_id = (int) $run['id'];
+                                    // Pattern: "(N Fehler" → "(N Fehler [als Link]"
+                                    $msg = preg_replace_callback(
+                                        '/\((\d+) Fehler/',
+                                        function( $matches ) use ( $run_id ) {
+                                            $link = '<a href="#" class="nf-ad-show-run-errors" data-run-id="' . esc_attr( $run_id ) . '">' . $matches[1] . ' Fehler</a>';
+                                            return '(' . $link;
+                                        },
+                                        $msg
+                                    );
+                                }
+                            }
+
                             echo wp_kses_post( strtr( $msg, $replacements ) );
                             ?>
                         </td>
@@ -631,7 +939,292 @@ class NF_AD_Dashboard {
                     $.post(ajaxurl,{action:'nf_ad_clear_runs', security: NF_AD_Config.nonce},function(){ location.reload(); });
                 }
             });
+
+            // Fehlerdetails für Cron-Runs laden und anzeigen.
+            $('.nf-ad-show-run-errors').on('click', function(e) {
+                e.preventDefault();
+                var runId = $(this).data('run-id');
+                var list = $('#error-details-list');
+
+                list.html('<li>Lade Fehlerdetails...</li>');
+                $('#error-details-modal').css('display', 'flex');
+
+                $.post(ajaxurl, {
+                    action: 'nf_ad_get_run_errors',
+                    security: window.NF_AD_Config.nonce,
+                    run_id: runId
+                }).done(function(response) {
+                    list.empty();
+                    if (response.success && response.data.errors.length > 0) {
+                        response.data.errors.forEach(function(err) {
+                            list.append('<li>' + $('<div>').text(err).html() + '</li>');
+                        });
+                    } else {
+                        list.append('<li>Keine Fehlerdetails verfügbar.</li>');
+                    }
+                }).fail(function() {
+                    list.html('<li style="color:#d63638;">Fehler beim Laden der Details.</li>');
+                });
+            });
+
+            // Error-Details-Modal schließen (für Logs-Tab).
+            $('#error-details-close').on('click', function() {
+                $('#error-details-modal').css('display', 'none');
+            });
+
+            // ESC-Taste schließt Modal (für Logs-Tab).
+            $(document).on('keydown', function(e) {
+                if (e.keyCode === 27 && $('#error-details-modal').is(':visible')) {
+                    $('#error-details-modal').css('display', 'none');
+                }
+            });
+
+            // Backdrop-Klick schließt Modal (für Logs-Tab).
+            $('#error-details-modal').on('click', function(e) {
+                if ($(e.target).hasClass('nf-ad-modal-overlay')) {
+                    $(this).css('display', 'none');
+                }
+            });
         });</script>
+        <?php
+    }
+
+    // =============================================================================
+    // TAB: PERSON SEARCH (DSGVO)
+    // =============================================================================
+
+    /* --- Renderer: Personen-Such-Tab --- */
+    /**
+     * Rendert den Personen-Such-Tab (DSGVO-Lookup).
+     *
+     * @since 2.4.0
+     * @return void
+     */
+    private static function render_person_tab() {
+        ?>
+        <div class="nf-ad-headline-row"><h2>Suche in allen Formularen</h2></div>
+
+        <p class="description" style="margin-bottom: 15px;">
+            Durchsucht alle Ninja Forms Einträge nach dem eingegebenen Begriff (z.B. E-Mail-Adresse).
+            Gefundene Einträge können ausgewählt und endgültig gelöscht werden.
+        </p>
+
+        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 20px;">
+            <input type="text"
+                   id="nf-ad-person-search-input"
+                   class="regular-text"
+                   placeholder="E-Mail, Name oder Suchbegriff..."
+                   style="max-width: 400px;">
+            <button type="button" id="nf-ad-person-search-btn" class="button button-primary">Suchen</button>
+        </div>
+
+        <div id="nf-ad-person-results">
+            <p class="description">Gib einen Suchbegriff ein (mindestens 3 Zeichen, nur ein Wort).</p>
+        </div>
+
+        <script>
+        jQuery(document).ready(function($) {
+            var currentPage = 1;
+            var currentTerm = '';
+
+            // Suche ausführen
+            $('#nf-ad-person-search-btn').on('click', function() {
+                currentTerm = $('#nf-ad-person-search-input').val().trim();
+                currentPage = 1;
+                doSearch();
+            });
+
+            // Enter-Taste für Suche
+            $('#nf-ad-person-search-input').on('keypress', function(e) {
+                if (e.which === 13) {
+                    e.preventDefault();
+                    $('#nf-ad-person-search-btn').click();
+                }
+            });
+
+            function doSearch() {
+                var btn = $('#nf-ad-person-search-btn');
+                var resultsDiv = $('#nf-ad-person-results');
+
+                if (currentTerm.length < 3) {
+                    resultsDiv.html('<p class="nf-ad-error">Bitte mindestens 3 Zeichen eingeben.</p>');
+                    return;
+                }
+
+                btn.prop('disabled', true).text('Suche läuft...');
+                resultsDiv.html('<p>Durchsuche alle Formulare...</p>');
+
+                $.post(ajaxurl, {
+                    action: 'nf_ad_person_search',
+                    security: NF_AD_Config.nonce,
+                    term: currentTerm,
+                    page: currentPage
+                })
+                .done(function(res) {
+                    if (res.success) {
+                        renderResults(res.data);
+                    } else {
+                        resultsDiv.html('<p class="nf-ad-error">' + escapeHtml(res.data) + '</p>');
+                    }
+                })
+                .fail(function() {
+                    resultsDiv.html('<p class="nf-ad-error">Fehler bei der Suche.</p>');
+                })
+                .always(function() {
+                    btn.prop('disabled', false).text('Suchen');
+                });
+            }
+
+            // Ergebnisse rendern (mit Sub-Tables für Feld-Details)
+            function renderResults(data) {
+                var resultsDiv = $('#nf-ad-person-results');
+                var results = data.results;
+
+                if (!results || results.length === 0) {
+                    resultsDiv.html('<p>Keine Einträge gefunden für "<strong>' + escapeHtml(currentTerm) + '</strong>".</p>');
+                    return;
+                }
+
+                var html = '';
+
+                // Tablenav oben (wie Log-Tab)
+                html += '<div class="tablenav top">';
+                html += '<div class="alignleft actions" style="display: flex; align-items: center; gap: 10px;">';
+                html += '<label style="display: flex; align-items: center; gap: 5px;"><input type="checkbox" id="nf-ad-select-all"> Alle markieren</label>';
+                html += '<button type="button" id="nf-ad-delete-selected" class="button action">Ausgewählte löschen</button>';
+                html += '</div>';
+                html += '<div class="tablenav-pages">';
+                html += '<span class="displaying-num">' + data.total + ' Einträge</span>';
+                if (data.pages > 1) {
+                    html += '<span class="pagination-links">';
+                    html += '<a class="button nf-ad-page-btn" data-page="' + Math.max(1, data.page - 1) + '"' + (data.page <= 1 ? ' disabled="disabled"' : '') + '>&lsaquo;</a>';
+                    html += ' Seite ' + data.page + ' von ' + data.pages + ' ';
+                    html += '<a class="button nf-ad-page-btn" data-page="' + Math.min(data.pages, data.page + 1) + '"' + (data.page >= data.pages ? ' disabled="disabled"' : '') + '>&rsaquo;</a>';
+                    html += '</span>';
+                }
+                html += '</div></div>';
+
+                // Tabelle mit Sub-Tables
+                html += '<table class="wp-list-table widefat fixed nf-ad-table-person">';
+                html += '<thead><tr><th style="width:40px;"></th><th style="width:60px;">ID</th><th>Formular</th><th style="width:120px;">Datum</th></tr></thead>';
+                html += '<tbody>';
+
+                results.forEach(function(item) {
+                    var dateFormatted = new Date(item.date).toLocaleDateString('de-DE');
+
+                    // Haupt-Zeile (Submission)
+                    html += '<tr class="nf-ad-submission-row">';
+                    html += '<td><input type="checkbox" class="nf-ad-sub-checkbox" value="' + item.id + '"></td>';
+                    html += '<td><code>#' + item.id + '</code></td>';
+                    html += '<td><strong>' + escapeHtml(item.form_title) + '</strong></td>';
+                    html += '<td>' + dateFormatted + '</td>';
+                    html += '</tr>';
+
+                    // Sub-Table mit Feld-Details (immer sichtbar)
+                    if (item.matches && item.matches.length > 0) {
+                        html += '<tr class="nf-ad-fields-row">';
+                        html += '<td></td>';
+                        html += '<td colspan="3">';
+                        html += '<table class="nf-ad-fields-table">';
+                        item.matches.forEach(function(match) {
+                            html += '<tr>';
+                            html += '<td class="nf-ad-field-label">' + escapeHtml(match.label) + '</td>';
+                            html += '<td class="nf-ad-field-value">' + escapeHtml(match.value) + '</td>';
+                            html += '</tr>';
+                        });
+                        html += '</table>';
+                        html += '</td>';
+                        html += '</tr>';
+                    }
+                });
+
+                html += '</tbody></table>';
+
+                // Warnung
+                html += '<p class="description nf-ad-danger" style="margin-top:15px;"><strong>Achtung:</strong> Löschen ist endgültig und kann nicht rückgängig gemacht werden. Zugehörige Dateien werden ebenfalls gelöscht.</p>';
+
+                resultsDiv.html(html);
+                bindResultEvents();
+            }
+
+            // Event-Handler für Ergebnis-Tabelle
+            function bindResultEvents() {
+                // Pagination
+                $('.nf-ad-page-btn').on('click', function() {
+                    if ($(this).attr('disabled')) return;
+                    currentPage = parseInt($(this).data('page'), 10);
+                    doSearch();
+                });
+
+                // Alle markieren
+                $('#nf-ad-select-all').on('change', function() {
+                    $('.nf-ad-sub-checkbox').prop('checked', $(this).is(':checked'));
+                });
+
+                // Löschen-Button
+                $('#nf-ad-delete-selected').on('click', function() {
+                    var selectedIds = [];
+                    $('.nf-ad-sub-checkbox:checked').each(function() {
+                        selectedIds.push($(this).val());
+                    });
+
+                    if (selectedIds.length === 0) {
+                        alert('Bitte mindestens einen Eintrag auswählen.');
+                        return;
+                    }
+
+                    if (!confirm('Wirklich ' + selectedIds.length + ' Einträge ENDGÜLTIG löschen?\n\nDies kann nicht rückgängig gemacht werden!')) {
+                        return;
+                    }
+
+                    deleteSubmissions(selectedIds);
+                });
+            }
+
+            // Löschung durchführen
+            function deleteSubmissions(ids) {
+                var btn = $('#nf-ad-delete-selected');
+                btn.prop('disabled', true).text('Lösche...');
+
+                $.post(ajaxurl, {
+                    action: 'nf_ad_person_delete',
+                    security: NF_AD_Config.nonce,
+                    ids: ids
+                })
+                .done(function(res) {
+                    if (res.success) {
+                        var msg = res.data.deleted + ' Einträge gelöscht';
+                        if (res.data.files > 0) {
+                            msg += ', ' + res.data.files + ' Dateien entfernt';
+                        }
+                        if (res.data.failed > 0) {
+                            msg += ' (' + res.data.failed + ' fehlgeschlagen)';
+                        }
+                        alert(msg);
+
+                        // Suche neu ausführen um Tabelle zu aktualisieren
+                        doSearch();
+                    } else {
+                        alert('Fehler: ' + res.data);
+                    }
+                })
+                .fail(function() {
+                    alert('Server-Fehler beim Löschen.');
+                })
+                .always(function() {
+                    btn.prop('disabled', false).text('Ausgewählte löschen');
+                });
+            }
+
+            // HTML escapen (XSS-Schutz)
+            function escapeHtml(text) {
+                if (!text) return '';
+                var div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        });
+        </script>
         <?php
     }
 
@@ -650,7 +1243,7 @@ class NF_AD_Dashboard {
             return;
         }
         $settings = get_option( self::OPTION_KEY, [] );
-        $context = isset( $_POST['nf_ad_context'] ) ? $_POST['nf_ad_context'] : '';
+        $context = isset( $_POST['nf_ad_context'] ) ? sanitize_key( $_POST['nf_ad_context'] ) : '';
 
         if ( $context === 'settings' ) {
             $settings['sub_handling']   = sanitize_key( $_POST['sub_handling'] ?? 'keep' );
@@ -794,6 +1387,42 @@ class NF_AD_Dashboard {
     }
 
     /**
+     * AJAX: Lädt die Fehlerdetails für einen bestimmten Run.
+     *
+     * @since 3.0.0
+     * @return void
+     */
+    public static function ajax_get_run_errors() {
+        check_ajax_referer( 'nf_ad_security', 'security' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $run_id = isset( $_POST['run_id'] ) ? absint( $_POST['run_id'] ) : 0;
+        if ( ! $run_id ) {
+            wp_send_json_error( 'Ungültige Run-ID.' );
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'nf_ad_cron_runs';
+        $error_details = $wpdb->get_var( $wpdb->prepare(
+            "SELECT error_details FROM $table WHERE id = %d",
+            $run_id
+        ) );
+
+        if ( empty( $error_details ) ) {
+            wp_send_json_success( [ 'errors' => [] ] );
+        }
+
+        $errors = json_decode( $error_details, true );
+        if ( ! is_array( $errors ) ) {
+            wp_send_json_success( [ 'errors' => [] ] );
+        }
+
+        wp_send_json_success( [ 'errors' => $errors ] );
+    }
+
+    /**
      * AJAX: Berechnet eine Simulation (Dry Run) für Einträge oder Uploads.
      *
      * Ruft je nach Typ die zuständige Klasse auf:
@@ -861,5 +1490,75 @@ class NF_AD_Dashboard {
             error_log( 'NF Auto Delete - Dry run failed: ' . $e->getMessage() );
             wp_send_json_error( 'Calculation failed.' );
         }
+    }
+
+    // =============================================================================
+    // AJAX: PERSON SEARCH (DSGVO)
+    // =============================================================================
+
+    /* --- AJAX: Suche und Löschung für DSGVO-Anfragen --- */
+
+    /**
+     * AJAX: Personen-Suche durchführen.
+     *
+     * @since 2.4.0
+     * @return void
+     */
+    public static function ajax_person_search() {
+        check_ajax_referer( 'nf_ad_security', 'security' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $term = isset( $_POST['term'] ) ? sanitize_text_field( $_POST['term'] ) : '';
+        $page = isset( $_POST['page'] ) ? absint( $_POST['page'] ) : 1;
+
+        if ( strlen( $term ) < 3 ) {
+            wp_send_json_error( 'Suchbegriff muss mindestens 3 Zeichen haben.' );
+        }
+
+        // Delegation an Person Search Klasse.
+        if ( ! class_exists( 'NF_AD_Person_Search' ) ) {
+            wp_send_json_error( 'Person Search Klasse nicht geladen.' );
+        }
+
+        $result = NF_AD_Person_Search::search( $term, $page );
+
+        if ( isset( $result['error'] ) ) {
+            wp_send_json_error( $result['error'] );
+        }
+
+        wp_send_json_success( $result );
+    }
+
+    /**
+     * AJAX: Ausgewählte Submissions löschen (DSGVO).
+     *
+     * @since 2.4.0
+     * @return void
+     */
+    public static function ajax_person_delete() {
+        check_ajax_referer( 'nf_ad_security', 'security' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Forbidden' );
+        }
+
+        $ids = isset( $_POST['ids'] ) ? array_map( 'absint', (array) $_POST['ids'] ) : [];
+        $ids = array_filter( $ids ); // Entferne 0-Werte.
+
+        if ( empty( $ids ) ) {
+            wp_send_json_error( 'Keine Einträge ausgewählt.' );
+        }
+
+        // Delegation an Person Search Klasse.
+        if ( ! class_exists( 'NF_AD_Person_Search' ) ) {
+            wp_send_json_error( 'Person Search Klasse nicht geladen.' );
+        }
+
+        $stats = NF_AD_Person_Search::delete_submissions( $ids );
+
+        wp_send_json_success( $stats );
     }
 }
