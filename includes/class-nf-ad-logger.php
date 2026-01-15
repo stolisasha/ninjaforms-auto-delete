@@ -153,6 +153,16 @@ class NF_AD_Logger {
     /* --- Einträge protokollieren --- */
 
     /**
+     * Static Cache für Formular-Titel.
+     *
+     * PERFORMANCE: Verhindert N+1 API-Aufrufe bei Batch-Operationen.
+     * Bei 1.000 Submissions desselben Formulars wird der Titel nur 1x abgerufen.
+     *
+     * @var array<int, string>
+     */
+    private static $form_title_cache = [];
+
+    /**
      * Schreibt einen Log-Eintrag für ein Formular-Submission.
      *
      * @param int    $fid    Formular-ID.
@@ -165,13 +175,9 @@ class NF_AD_Logger {
      */
     public static function log( $fid, $sid, $sdate, $status, $msg ) {
         global $wpdb;
-        $title = 'Unbekannt';
-        if ( class_exists( 'Ninja_Forms' ) ) {
-            $form_obj = Ninja_Forms()->form( $fid )->get();
-            if ( $form_obj ) {
-                $title = $form_obj->get_setting( 'title' );
-            }
-        }
+
+        // PERFORMANCE: Form-Titel aus Cache oder Ninja Forms API holen.
+        $title = self::get_form_title_cached( $fid );
         $result = $wpdb->insert(
             $wpdb->prefix . self::TABLE_LOGS,
             [
@@ -190,6 +196,42 @@ class NF_AD_Logger {
         if ( false === $result && ! empty( $wpdb->last_error ) ) {
             error_log( '[NF Auto Delete] Failed to write log entry: ' . $wpdb->last_error );
         }
+    }
+
+    /**
+     * Holt den Formulartitel aus dem Cache oder der Ninja Forms API.
+     *
+     * PERFORMANCE: Bei Batch-Operationen mit vielen Submissions desselben Formulars
+     * wird der API-Aufruf nur einmal gemacht statt N-mal (N+1 Query Problem).
+     *
+     * @param int $form_id Formular-ID.
+     *
+     * @return string Formulartitel oder Fallback.
+     */
+    private static function get_form_title_cached( $form_id ) {
+        $form_id = absint( $form_id );
+
+        // Cache-Hit: Direkt zurückgeben (Fast-Path).
+        if ( isset( self::$form_title_cache[ $form_id ] ) ) {
+            return self::$form_title_cache[ $form_id ];
+        }
+
+        // Cache-Miss: Ninja Forms API aufrufen.
+        $title = 'Unbekannt';
+        if ( class_exists( 'Ninja_Forms' ) ) {
+            $form_obj = Ninja_Forms()->form( $form_id )->get();
+            if ( $form_obj && method_exists( $form_obj, 'get_setting' ) ) {
+                $fetched_title = $form_obj->get_setting( 'title' );
+                if ( ! empty( $fetched_title ) ) {
+                    $title = $fetched_title;
+                }
+            }
+        }
+
+        // Im Cache speichern für zukünftige Aufrufe.
+        self::$form_title_cache[ $form_id ] = $title;
+
+        return $title;
     }
 
     // =============================================================================
